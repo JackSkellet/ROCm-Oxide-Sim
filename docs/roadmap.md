@@ -57,13 +57,15 @@
 - Improved scene variety for all camera sensors and datasets with
   `examples/scenes/boxes_scene.json`.
 
-## Milestone 5B: Domain Randomization
+## Milestone 5B: Domain Randomization (Completed)
 
-- Add deterministic scene/config randomization for primitive positions,
-  material colors/kinds, and camera path parameters.
-- Preserve reproducibility through explicit seeds and manifest metadata.
-- Keep randomization limited to supported primitives until mesh/BVH support
+- Added deterministic scene/config randomization for primitive positions, scale,
+  material colors/kinds, emissive intensity, and camera pose/FOV parameters.
+- Preserved reproducibility through explicit seeds, frame seeds, manifest
+  metadata, and relative output paths.
+- Kept randomization limited to supported primitives until mesh/BVH support
   exists.
+- Documented the current per-frame scene upload strategy.
 
 ## Milestone 5C: LiDAR/Raycast Sensor
 

@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use sim_core::Scene;
 use sim_datasets::{
     CameraPathConfig, DatasetConfig, DatasetFrameMetadata, DatasetWriter, SensorImageSet,
-    camera_for_dataset_frame, frame_output_paths_for_selection, validate_dataset,
+    camera_for_dataset_frame, frame_output_paths_for_selection, randomize_camera_for_frame,
+    randomize_scene_for_frame, validate_dataset,
 };
 #[cfg(feature = "rocm")]
 use sim_render_rocm::RocmSensorRenderer;
@@ -34,6 +35,8 @@ struct Args {
     camera_path: Option<CameraPathKind>,
     #[arg(long)]
     seed: Option<u64>,
+    #[arg(long)]
+    randomize: bool,
     #[arg(long)]
     overwrite: bool,
     #[arg(long)]
@@ -97,7 +100,22 @@ fn run_generate(args: Args) -> Result<(), Box<dyn Error>> {
     let scene = load_scene(config.scene_path.as_deref())?;
     let object_ids = scene_object_ids(&scene);
     println!("dataset_generator: scene entities={}", scene.len());
-    let render_session = RenderSession::open(&scene)?;
+    if config.domain_randomization.enabled {
+        println!(
+            "dataset_generator: domain randomization enabled seed={} per_frame={}",
+            config.domain_randomization.effective_seed(config.seed),
+            config.domain_randomization.per_frame
+        );
+    }
+    let static_render_scene =
+        if config.domain_randomization.enabled && !config.domain_randomization.per_frame {
+            randomize_scene_for_frame(&scene, &config.domain_randomization, config.seed, 1).scene
+        } else {
+            scene.clone()
+        };
+    let upload_static_scene =
+        !config.domain_randomization.enabled || !config.domain_randomization.per_frame;
+    let render_session = RenderSession::open(&static_render_scene, upload_static_scene)?;
 
     let mut writer = DatasetWriter::new_with_config(
         &config.output_dir,
@@ -108,7 +126,7 @@ fn run_generate(args: Args) -> Result<(), Box<dyn Error>> {
         object_ids.clone(),
     )?;
 
-    render_dataset(&config, &object_ids, &render_session, &mut writer)?;
+    render_dataset(&config, &scene, &object_ids, &render_session, &mut writer)?;
 
     let manifest = writer.finish()?;
     println!(
@@ -148,6 +166,9 @@ fn resolve_config(args: &Args) -> Result<(DatasetConfig, Option<PathBuf>), Box<d
     }
     if let Some(seed) = args.seed {
         config.seed = seed;
+    }
+    if args.randomize {
+        config.domain_randomization.enabled = true;
     }
 
     Ok((config.normalized(), args.config.clone()))
@@ -210,13 +231,14 @@ fn load_scene(path: Option<&Path>) -> Result<Scene, Box<dyn Error>> {
 
 fn render_dataset(
     config: &DatasetConfig,
+    base_scene: &Scene,
     object_ids: &[sim_sensors::ObjectIdMetadata],
     render_session: &RenderSession,
     writer: &mut DatasetWriter,
 ) -> Result<(), Box<dyn Error>> {
     for frame_index in 1..=config.frame_count {
         let timestamp_seconds = (frame_index - 1) as f64 / 30.0;
-        let camera = camera_for_dataset_frame(
+        let mut camera = camera_for_dataset_frame(
             &config.camera_path,
             frame_index,
             config.frame_count,
@@ -224,9 +246,26 @@ fn render_dataset(
             config.height,
             config.seed,
         );
+        camera = randomize_camera_for_frame(
+            camera,
+            &config.domain_randomization,
+            config.seed,
+            frame_index as u64,
+        );
+        let randomized = randomize_scene_for_frame(
+            base_scene,
+            &config.domain_randomization,
+            config.seed,
+            frame_index as u64,
+        );
+        let render_scene = if config.domain_randomization.enabled {
+            &randomized.scene
+        } else {
+            base_scene
+        };
         let sensor = RgbCameraSensor::new("rgb-main", camera);
         let paths = frame_output_paths_for_selection(frame_index as u64, config.outputs);
-        let metadata = DatasetFrameMetadata::new(
+        let mut metadata = DatasetFrameMetadata::new(
             frame_index as u64,
             timestamp_seconds,
             sensor.id(),
@@ -238,8 +277,11 @@ fn render_dataset(
             object_ids.to_vec(),
             Some(render_session.backend_label()),
         );
+        if config.domain_randomization.enabled {
+            metadata = metadata.with_randomization(randomized.metadata);
+        }
 
-        let images = render_session.render_images(&sensor, frame_index as u64)?;
+        let images = render_session.render_images(render_scene, &sensor, frame_index as u64)?;
         writer.write_sensor_outputs(frame_index as u64, &images, &metadata)?;
     }
 
@@ -254,7 +296,7 @@ enum RenderSession {
 }
 
 impl RenderSession {
-    fn open(scene: &Scene) -> Result<Self, Box<dyn Error>> {
+    fn open(scene: &Scene, upload_static_scene: bool) -> Result<Self, Box<dyn Error>> {
         #[cfg(feature = "rocm")]
         {
             match RocmSensorRenderer::new() {
@@ -263,7 +305,11 @@ impl RenderSession {
                         "dataset_generator: using ROCm-Oxide renderer on {}",
                         renderer.device_arch()
                     );
-                    let uploaded_scene = renderer.upload_scene(scene)?;
+                    let uploaded_scene = if upload_static_scene {
+                        Some(renderer.upload_scene(scene)?)
+                    } else {
+                        None
+                    };
                     return Ok(Self::Rocm(RocmDatasetRenderer {
                         backend_label: format!("rocm:{}", renderer.device_arch()),
                         renderer,
@@ -275,7 +321,7 @@ impl RenderSession {
         }
         #[cfg(not(feature = "rocm"))]
         {
-            let _ = scene;
+            let _ = (scene, upload_static_scene);
             println!("dataset_generator: ROCm renderer unavailable: built without --features rocm");
             println!("dataset_generator: writing deterministic CPU preview outputs");
             Ok(Self::CpuPreview)
@@ -293,6 +339,7 @@ impl RenderSession {
 
     fn render_images(
         &self,
+        scene: &Scene,
         sensor: &RgbCameraSensor,
         frame_index: u64,
     ) -> Result<SensorImageSet, Box<dyn Error>> {
@@ -301,11 +348,20 @@ impl RenderSession {
             Self::Rocm(rocm) => {
                 let render_metadata =
                     FrameMetadata::new(frame_index, frame_index as f64 / 30.0, sensor.id());
-                let output = rocm.renderer.render_uploaded_scene_to_device(
-                    &rocm.uploaded_scene,
-                    sensor,
-                    render_metadata,
-                )?;
+                let output = if let Some(uploaded_scene) = &rocm.uploaded_scene {
+                    rocm.renderer.render_uploaded_scene_to_device(
+                        uploaded_scene,
+                        sensor,
+                        render_metadata,
+                    )?
+                } else {
+                    let uploaded_scene = rocm.renderer.upload_scene(scene)?;
+                    rocm.renderer.render_uploaded_scene_to_device(
+                        &uploaded_scene,
+                        sensor,
+                        render_metadata,
+                    )?
+                };
                 let host = rocm.renderer.copy_all_to_host(&output)?;
                 Ok(SensorImageSet::from_frames(
                     host.rgb,
@@ -314,11 +370,14 @@ impl RenderSession {
                 )?)
             }
             #[cfg(not(feature = "rocm"))]
-            Self::CpuPreview => Ok(SensorImageSet::synthetic_preview(
-                sensor.intrinsics().width,
-                sensor.intrinsics().height,
-                frame_index,
-            )),
+            Self::CpuPreview => {
+                let _ = scene;
+                Ok(SensorImageSet::synthetic_preview(
+                    sensor.intrinsics().width,
+                    sensor.intrinsics().height,
+                    frame_index,
+                ))
+            }
         }
     }
 }
@@ -327,7 +386,7 @@ impl RenderSession {
 struct RocmDatasetRenderer {
     backend_label: String,
     renderer: RocmSensorRenderer,
-    uploaded_scene: sim_render_rocm::RocmScene,
+    uploaded_scene: Option<sim_render_rocm::RocmScene>,
 }
 
 fn path_to_string(path: &PathBuf) -> String {
@@ -346,6 +405,7 @@ mod tests {
             "random",
             "--seed",
             "1234",
+            "--randomize",
             "--frames",
             "4",
             "--out",
@@ -358,6 +418,7 @@ mod tests {
         assert_eq!(generate.frames, Some(4));
         assert_eq!(generate.seed, Some(1234));
         assert_eq!(generate.camera_path, Some(CameraPathKind::Random));
+        assert!(generate.randomize);
         assert!(generate.overwrite);
         assert!(generate.dry_run);
 

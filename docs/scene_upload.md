@@ -56,6 +56,10 @@ derived from the local plane offset and entity transform. Box centers come from
 the entity transform translation and half-extents are scaled per axis by the
 absolute transform scale; rotation is ignored.
 
+Domain-randomized datasets clone the base `sim-core::Scene` before changing
+object transforms or materials. Per-frame randomization may upload a fresh
+`RocmScene` each frame. Dynamic GPU-side scene mutation is still future work.
+
 ## Materials
 
 `sim-core::Material` now carries:

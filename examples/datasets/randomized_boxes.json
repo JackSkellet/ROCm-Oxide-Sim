@@ -1,0 +1,79 @@
+{
+  "scene_path": "examples/scenes/boxes_scene.json",
+  "output_dir": "target/randomized_boxes",
+  "frame_count": 32,
+  "width": 1280,
+  "height": 720,
+  "camera_path": {
+    "kind": "orbit",
+    "target": {
+      "x": 0.0,
+      "y": 0.55,
+      "z": -1.55
+    },
+    "radius": 4.1,
+    "height": 1.35,
+    "start_angle_degrees": 0.0,
+    "end_angle_degrees": 360.0,
+    "fov_y_degrees": 46.0
+  },
+  "seed": 1234,
+  "domain_randomization": {
+    "enabled": true,
+    "per_frame": true,
+    "object_transforms": {
+      "enabled": true,
+      "position_jitter": {
+        "x": 0.25,
+        "y": 0.0,
+        "z": 0.25
+      },
+      "scale_range": [
+        0.8,
+        1.2
+      ],
+      "include_planes": false
+    },
+    "materials": {
+      "enabled": true,
+      "base_color_jitter": 0.18,
+      "randomize_kind": false,
+      "emissive_intensity_range": [
+        0.8,
+        1.35
+      ]
+    },
+    "lights": {
+      "enabled": true,
+      "position_jitter": {
+        "x": 0.35,
+        "y": 0.2,
+        "z": 0.35
+      },
+      "intensity_range": [
+        0.85,
+        1.3
+      ]
+    },
+    "camera": {
+      "enabled": true,
+      "pose_jitter": {
+        "x": 0.05,
+        "y": 0.02,
+        "z": 0.05
+      },
+      "fov_degrees_range": [
+        42.0,
+        50.0
+      ]
+    }
+  },
+  "outputs": {
+    "rgb": true,
+    "depth": true,
+    "depth_preview": true,
+    "segmentation": true,
+    "segmentation_preview": true,
+    "metadata": true
+  }
+}

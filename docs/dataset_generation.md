@@ -30,6 +30,15 @@ cargo run -p dataset_generator --features rocm -- \
   --overwrite
 ```
 
+Generate a deterministic randomized dataset:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --config examples/datasets/randomized_boxes.json \
+  --out target/randomized_boxes \
+  --overwrite
+```
+
 Validate a generated dataset:
 
 ```bash
@@ -55,6 +64,7 @@ Generation accepts:
 --camera-path static|orbit|line|random
 --seed <u64>
 --config <PATH>
+--randomize
 --overwrite
 --dry-run
 ```
@@ -101,6 +111,10 @@ Config files are JSON and map to `DatasetConfig`:
 ```
 
 CLI flags override config values where they refer to the same setting.
+
+See [Domain randomization](domain_randomization.md) for the
+`domain_randomization` config block used by
+`examples/datasets/randomized_boxes.json`.
 
 ## Camera Paths
 
@@ -152,6 +166,8 @@ Each `metadata/frame_000001.json` includes:
 - Scene file path when a scene file was used.
 - Object ID map.
 - Primitive type and material kind for scene-derived object IDs.
+- Domain randomization seed, frame seed, per-frame flag, object transforms, and
+  randomized material state when enabled.
 - Renderer backend label, such as `rocm:gfx1201` or `cpu-preview`.
 - Depth convention: linear camera ray distance in meters, `0.0` for miss.
 - Segmentation convention: `u32` object IDs, `0` background.
@@ -167,6 +183,7 @@ Each `metadata/frame_000001.json` includes:
 - Camera path config.
 - Enabled output set.
 - Object ID map.
+- Domain randomization config when enabled.
 - Relative metadata path for every frame.
 - Depth and segmentation conventions.
 - Renderer backend label.
@@ -183,6 +200,7 @@ The validation command checks:
 - Per-frame metadata files parse.
 - Object ID maps exist.
 - Metadata dimensions match manifest dimensions when present.
+- Randomized datasets include per-frame `domain_randomization` metadata.
 
 ## Current Limitations
 
@@ -190,6 +208,7 @@ The validation command checks:
   primitives.
 - Box rotation is ignored; only translation and scale affect uploaded boxes.
 - No meshes or BVH.
-- No domain randomization beyond deterministic camera paths.
+- Domain randomization is deterministic but not collision-aware.
+- Per-frame domain randomization may upload a fresh scene every frame.
 - No physics, LiDAR, ROS2, OpenUSD, or URDF.
 - Viewer presentation still uses ROCm -> host copy -> pixels upload.

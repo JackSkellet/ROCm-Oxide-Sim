@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added Milestone 5B deterministic domain randomization for dataset generation.
+- Added randomized object position/scale, material color/kind, emissive
+  intensity, and camera pose/FOV controls.
+- Added randomization metadata to frame JSON and manifests, plus validation for
+  randomized datasets.
+- Added `examples/datasets/randomized_boxes.json`.
 - Added Milestone 5A ROCm scene upload support for `PrimitiveShape::Box` as a
   world-space AABB primitive.
 - Added `GpuBox` buffers and HIPRTC ray/AABB slab intersection alongside the

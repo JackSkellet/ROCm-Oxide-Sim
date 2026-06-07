@@ -14,7 +14,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use sim_core::{Camera, Vec3};
+use sim_core::{Camera, MaterialKind, PrimitiveShape, Scene, Transform, Vec3};
 use sim_sensors::{
     CameraIntrinsics, DepthFrame, FrameMetadata, FrameOutputMetadata, ObjectIdMetadata, RgbFrame,
     SegmentationFrame,
@@ -230,6 +230,148 @@ impl Default for CameraPathConfig {
     }
 }
 
+/// Deterministic domain randomization controls for dataset generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainRandomizationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(default = "default_true")]
+    pub per_frame: bool,
+    #[serde(default)]
+    pub object_transforms: ObjectTransformRandomization,
+    #[serde(default)]
+    pub materials: MaterialRandomization,
+    #[serde(default)]
+    pub lights: LightRandomization,
+    #[serde(default)]
+    pub camera: CameraRandomization,
+}
+
+impl DomainRandomizationConfig {
+    pub fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
+
+    pub fn effective_seed(&self, dataset_seed: u64) -> u64 {
+        self.seed.unwrap_or(dataset_seed)
+    }
+
+    pub fn frame_seed(&self, dataset_seed: u64, frame_index: u64) -> u64 {
+        let seed = self.effective_seed(dataset_seed);
+        if self.per_frame {
+            seed ^ frame_index.wrapping_mul(0xd1b5_4a32_d192_ed03)
+        } else {
+            seed
+        }
+    }
+}
+
+impl Default for DomainRandomizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            seed: None,
+            per_frame: true,
+            object_transforms: ObjectTransformRandomization::default(),
+            materials: MaterialRandomization::default(),
+            lights: LightRandomization::default(),
+            camera: CameraRandomization::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ObjectTransformRandomization {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub position_jitter: Vec3,
+    #[serde(default = "unit_range")]
+    pub scale_range: [f32; 2],
+    #[serde(default)]
+    pub include_planes: bool,
+}
+
+impl Default for ObjectTransformRandomization {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position_jitter: Vec3::ZERO,
+            scale_range: [1.0, 1.0],
+            include_planes: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MaterialRandomization {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub base_color_jitter: f32,
+    #[serde(default)]
+    pub randomize_kind: bool,
+    #[serde(default = "unit_range")]
+    pub emissive_intensity_range: [f32; 2],
+}
+
+impl Default for MaterialRandomization {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_color_jitter: 0.0,
+            randomize_kind: false,
+            emissive_intensity_range: [1.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LightRandomization {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub position_jitter: Vec3,
+    #[serde(default = "unit_range")]
+    pub intensity_range: [f32; 2],
+}
+
+impl Default for LightRandomization {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position_jitter: Vec3::ZERO,
+            intensity_range: [1.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CameraRandomization {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub pose_jitter: Vec3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov_degrees_range: Option<[f32; 2]>,
+}
+
+impl Default for CameraRandomization {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pose_jitter: Vec3::ZERO,
+            fov_degrees_range: None,
+        }
+    }
+}
+
+fn unit_range() -> [f32; 2] {
+    [1.0, 1.0]
+}
+
 /// Top-level generator configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetConfig {
@@ -247,6 +389,11 @@ pub struct DatasetConfig {
     pub camera_path: CameraPathConfig,
     #[serde(default)]
     pub seed: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "DomainRandomizationConfig::is_disabled"
+    )]
+    pub domain_randomization: DomainRandomizationConfig,
     #[serde(default)]
     pub outputs: OutputSelection,
 }
@@ -261,6 +408,7 @@ impl Default for DatasetConfig {
             height: default_height(),
             camera_path: CameraPathConfig::default(),
             seed: 0,
+            domain_randomization: DomainRandomizationConfig::default(),
             outputs: OutputSelection::all(),
         }
     }
@@ -377,6 +525,215 @@ impl DeterministicRng {
     fn range_f32(&mut self, min: f32, max: f32) -> f32 {
         min + (max - min) * self.next_f32()
     }
+
+    fn signed_range_f32(&mut self, extent: f32) -> f32 {
+        self.range_f32(-extent.abs(), extent.abs())
+    }
+
+    fn jitter_vec3(&mut self, extents: Vec3) -> Vec3 {
+        Vec3::new(
+            self.signed_range_f32(extents.x),
+            self.signed_range_f32(extents.y),
+            self.signed_range_f32(extents.z),
+        )
+    }
+
+    fn index(&mut self, len: usize) -> usize {
+        if len == 0 {
+            0
+        } else {
+            (self.next_u64() as usize) % len
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RandomizedSceneFrame {
+    pub scene: Scene,
+    pub frame_seed: u64,
+    pub objects: Vec<RandomizedObjectMetadata>,
+    pub metadata: DomainRandomizationFrameMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainRandomizationFrameMetadata {
+    pub enabled: bool,
+    pub seed: u64,
+    pub frame_seed: u64,
+    pub per_frame: bool,
+    pub objects: Vec<RandomizedObjectMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RandomizedObjectMetadata {
+    pub object_id: u32,
+    pub name: String,
+    pub primitive: String,
+    pub material: String,
+    pub transform: Transform,
+    pub material_state: RandomizedMaterialMetadata,
+    pub randomized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RandomizedMaterialMetadata {
+    pub base_color: Vec3,
+    pub emission: Vec3,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub kind: MaterialKind,
+}
+
+pub fn randomize_scene_for_frame(
+    base_scene: &Scene,
+    config: &DomainRandomizationConfig,
+    dataset_seed: u64,
+    frame_index: u64,
+) -> RandomizedSceneFrame {
+    let seed = config.effective_seed(dataset_seed);
+    let frame_seed = config.frame_seed(dataset_seed, frame_index);
+    let mut scene = base_scene.clone();
+
+    if config.enabled {
+        let mut rng = DeterministicRng::new(frame_seed);
+        let ids = scene.entities().map(|entity| entity.id).collect::<Vec<_>>();
+        for id in ids {
+            let Some(entity) = scene.entity_mut(id) else {
+                continue;
+            };
+
+            if config.object_transforms.enabled
+                && randomize_transform_for_shape(
+                    entity.shape,
+                    config.object_transforms.include_planes,
+                )
+            {
+                entity.transform.translation = entity.transform.translation
+                    + rng.jitter_vec3(config.object_transforms.position_jitter);
+                let [scale_min, scale_max] = sorted_range(config.object_transforms.scale_range);
+                let scale = rng.range_f32(scale_min, scale_max).max(0.001);
+                entity.transform.scale = entity.transform.scale * scale;
+            }
+
+            let is_emissive = entity.material.kind == MaterialKind::Emissive
+                || entity.material.emission.length_squared() > 0.0;
+            if config.lights.enabled && is_emissive {
+                entity.transform.translation =
+                    entity.transform.translation + rng.jitter_vec3(config.lights.position_jitter);
+                let [intensity_min, intensity_max] = sorted_range(config.lights.intensity_range);
+                let intensity = rng.range_f32(intensity_min, intensity_max).max(0.0);
+                entity.material.emission = entity.material.emission * intensity;
+            }
+
+            if config.materials.enabled {
+                let jitter = config.materials.base_color_jitter.abs();
+                if jitter > 0.0 {
+                    entity.material.base_color = Vec3::new(
+                        clamp01(entity.material.base_color.x + rng.signed_range_f32(jitter)),
+                        clamp01(entity.material.base_color.y + rng.signed_range_f32(jitter)),
+                        clamp01(entity.material.base_color.z + rng.signed_range_f32(jitter)),
+                    );
+                }
+
+                if config.materials.randomize_kind && entity.material.kind != MaterialKind::Emissive
+                {
+                    let kinds = [
+                        MaterialKind::Diffuse,
+                        MaterialKind::Matte,
+                        MaterialKind::MetalPreview,
+                    ];
+                    entity.material.kind = kinds[rng.index(kinds.len())];
+                }
+
+                if is_emissive {
+                    let [intensity_min, intensity_max] =
+                        sorted_range(config.materials.emissive_intensity_range);
+                    let intensity = rng.range_f32(intensity_min, intensity_max).max(0.0);
+                    entity.material.emission = entity.material.emission * intensity;
+                }
+            }
+        }
+    }
+
+    let objects: Vec<RandomizedObjectMetadata> = scene
+        .entities()
+        .filter(|entity| entity.object_id.get() != 0)
+        .map(|entity| RandomizedObjectMetadata {
+            object_id: entity.object_id.get(),
+            name: entity.name.clone(),
+            primitive: primitive_label(entity.shape).to_string(),
+            material: entity.material.kind.as_str().to_string(),
+            transform: entity.transform,
+            material_state: RandomizedMaterialMetadata {
+                base_color: entity.material.base_color,
+                emission: entity.material.emission,
+                roughness: entity.material.roughness,
+                metallic: entity.material.metallic,
+                kind: entity.material.kind,
+            },
+            randomized: config.enabled,
+        })
+        .collect();
+
+    RandomizedSceneFrame {
+        scene,
+        frame_seed,
+        objects: objects.clone(),
+        metadata: DomainRandomizationFrameMetadata {
+            enabled: config.enabled,
+            seed,
+            frame_seed,
+            per_frame: config.per_frame,
+            objects,
+        },
+    }
+}
+
+pub fn randomize_camera_for_frame(
+    mut camera: Camera,
+    config: &DomainRandomizationConfig,
+    dataset_seed: u64,
+    frame_index: u64,
+) -> Camera {
+    if !config.enabled || !config.camera.enabled {
+        return camera;
+    }
+
+    let mut rng =
+        DeterministicRng::new(config.frame_seed(dataset_seed, frame_index) ^ 0x4341_4d45_5241);
+    camera.position = camera.position + rng.jitter_vec3(config.camera.pose_jitter);
+    if let Some(range) = config.camera.fov_degrees_range {
+        let [min_fov, max_fov] = sorted_range(range);
+        camera.vertical_fov_degrees = rng.range_f32(min_fov, max_fov).max(1.0);
+    }
+    camera
+}
+
+fn randomize_transform_for_shape(shape: PrimitiveShape, include_planes: bool) -> bool {
+    match shape {
+        PrimitiveShape::Sphere { .. } | PrimitiveShape::Box { .. } => true,
+        PrimitiveShape::Plane { .. } => include_planes,
+    }
+}
+
+fn primitive_label(shape: PrimitiveShape) -> &'static str {
+    match shape {
+        PrimitiveShape::Sphere { .. } => "sphere",
+        PrimitiveShape::Box { .. } => "box",
+        PrimitiveShape::Plane { .. } => "plane",
+    }
+}
+
+fn sorted_range(range: [f32; 2]) -> [f32; 2] {
+    if range[0] <= range[1] {
+        range
+    } else {
+        [range[1], range[0]]
+    }
+}
+
+fn clamp01(value: f32) -> f32 {
+    value.clamp(0.0, 1.0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -546,6 +903,8 @@ pub struct DatasetFrameMetadata {
     pub renderer_backend: Option<String>,
     pub depth_convention: DepthConventionMetadata,
     pub segmentation_convention: SegmentationConventionMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_randomization: Option<DomainRandomizationFrameMetadata>,
 }
 
 impl DatasetFrameMetadata {
@@ -576,7 +935,13 @@ impl DatasetFrameMetadata {
             renderer_backend,
             depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
             segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
+            domain_randomization: None,
         }
+    }
+
+    pub fn with_randomization(mut self, randomization: DomainRandomizationFrameMetadata) -> Self {
+        self.domain_randomization = Some(randomization);
+        self
     }
 }
 
@@ -800,6 +1165,8 @@ pub struct DatasetManifest {
     pub depth_convention: DepthConventionMetadata,
     pub segmentation_convention: SegmentationConventionMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_randomization: Option<DomainRandomizationConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub renderer_backend: Option<String>,
 }
 
@@ -827,6 +1194,7 @@ impl DatasetManifest {
             frames: Vec::new(),
             depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
             segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
+            domain_randomization: None,
             renderer_backend: None,
         }
     }
@@ -854,6 +1222,11 @@ impl DatasetManifest {
     pub fn with_frames(mut self, frames: Vec<ManifestFrame>) -> Self {
         self.frame_count = frames.len() as u32;
         self.frames = frames;
+        self
+    }
+
+    pub fn with_domain_randomization(mut self, randomization: DomainRandomizationConfig) -> Self {
+        self.domain_randomization = randomization.enabled.then_some(randomization);
         self
     }
 }
@@ -987,7 +1360,8 @@ impl DatasetWriter {
         .with_scene_path(self.scene_path.clone())
         .with_config_path(self.config_path.clone())
         .with_object_ids(self.object_ids.clone())
-        .with_frames(self.frames.clone());
+        .with_frames(self.frames.clone())
+        .with_domain_randomization(self.config.domain_randomization.clone());
         manifest.renderer_backend = Some(self.renderer_backend.clone());
         let path = self.root.join("dataset_manifest.json");
         let json = serde_json::to_string_pretty(&manifest)?;
@@ -1154,6 +1528,10 @@ pub fn validate_dataset(
             "object ID map is empty".to_string(),
         ));
     }
+    let randomization_enabled = manifest
+        .domain_randomization
+        .as_ref()
+        .is_some_and(|config| config.enabled);
 
     for frame in &manifest.frames {
         check_optional_file(root, frame.rgb.as_deref())?;
@@ -1200,6 +1578,47 @@ pub fn validate_dataset(
                     manifest.height
                 ),
             });
+        }
+        if randomization_enabled {
+            let randomization = metadata.get("domain_randomization").ok_or_else(|| {
+                ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "missing domain_randomization section".to_string(),
+                }
+            })?;
+            if !randomization
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                return Err(ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "domain_randomization.enabled is not true".to_string(),
+                });
+            }
+            if randomization
+                .get("frame_seed")
+                .and_then(|value| value.as_u64())
+                .is_none()
+            {
+                return Err(ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "missing domain_randomization.frame_seed".to_string(),
+                });
+            }
+            let objects = randomization
+                .get("objects")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "missing domain_randomization.objects array".to_string(),
+                })?;
+            if objects.is_empty() {
+                return Err(ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "domain_randomization.objects array is empty".to_string(),
+                });
+            }
         }
     }
 

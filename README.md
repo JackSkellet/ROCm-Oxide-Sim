@@ -22,6 +22,9 @@ Isaac Sim replacement.
   material kinds.
 - `examples/datasets/basic_orbit.json` demonstrates deterministic dataset
   config-file generation.
+- `examples/datasets/randomized_boxes.json` demonstrates deterministic domain
+  randomization for object transforms, materials, emissive objects, and camera
+  parameters.
 - LiDAR/raycast sensors, full physics, ROS2, OpenUSD, and robot model
   integration are planned but not implemented yet.
 
@@ -109,11 +112,15 @@ Generate a small dataset:
 cargo run -p dataset_generator --features rocm -- --frames 16 --out target/sim_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- --config examples/datasets/basic_orbit.json --out target/sim_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- --scene examples/scenes/boxes_scene.json --frames 4 --out target/boxes_dataset --overwrite
+cargo run -p dataset_generator --features rocm -- --config examples/datasets/randomized_boxes.json --out target/randomized_boxes --overwrite
 cargo run -p dataset_generator --features rocm -- validate --dataset target/sim_dataset
+cargo run -p dataset_generator --features rocm -- validate --dataset target/randomized_boxes
 ```
 
 See [Dataset generation](docs/dataset_generation.md) for config files, camera
 paths, manifests, metadata, and validation.
+See [Domain randomization](docs/domain_randomization.md) for seeded randomized
+dataset generation.
 
 Run the live viewer:
 
@@ -140,6 +147,7 @@ the output buffer back, the renderer returns a clear error with the failed step.
 - [Scene upload](docs/scene_upload.md)
 - [Sensor outputs](docs/sensor_outputs.md)
 - [Dataset generation](docs/dataset_generation.md)
+- [Domain randomization](docs/domain_randomization.md)
 - [Live viewer](docs/live_viewer.md)
 - [Roadmap](docs/roadmap.md)
 - [Physics plan](docs/physics_plan.md)

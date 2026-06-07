@@ -1,7 +1,10 @@
+use sim_core::{Camera, Entity, Material, ObjectId, PrimitiveShape, Scene, Transform, Vec3};
 use sim_datasets::{
-    CameraPathConfig, DatasetConfig, DatasetManifest, DatasetWriter, DepthImage, OutputSelection,
-    RgbImage, SegmentationImage, SensorImageSet, ValidationError, camera_for_dataset_frame,
-    depth_preview_pixels, frame_output_paths, segmentation_color, validate_dataset,
+    CameraPathConfig, DatasetConfig, DatasetManifest, DatasetWriter, DepthImage,
+    DomainRandomizationConfig, ObjectTransformRandomization, OutputSelection, RgbImage,
+    SegmentationImage, SensorImageSet, ValidationError, camera_for_dataset_frame,
+    depth_preview_pixels, frame_output_paths, randomize_camera_for_frame,
+    randomize_scene_for_frame, segmentation_color, validate_dataset,
 };
 use sim_sensors::{DepthMetadata, FrameMetadata, FrameOutputMetadata, ObjectIdMetadata};
 
@@ -263,4 +266,197 @@ fn validation_reports_missing_expected_files() {
 
     assert!(matches!(err, ValidationError::MissingFile(_)));
     assert!(err.to_string().contains("rgb/frame_000001.ppm"));
+}
+
+#[test]
+fn domain_randomization_is_reproducible_for_same_seed() {
+    let scene = randomizable_scene();
+    let config = randomization_config(true);
+
+    let a = randomize_scene_for_frame(&scene, &config, 1234, 1);
+    let b = randomize_scene_for_frame(&scene, &config, 1234, 1);
+
+    assert_eq!(a.frame_seed, b.frame_seed);
+    assert_eq!(a.scene, b.scene);
+    assert_eq!(a.objects, b.objects);
+}
+
+#[test]
+fn domain_randomization_changes_with_different_seed_but_keeps_object_ids() {
+    let scene = randomizable_scene();
+    let config = randomization_config(true);
+
+    let a = randomize_scene_for_frame(&scene, &config, 1234, 1);
+    let b = randomize_scene_for_frame(&scene, &config, 5678, 1);
+
+    assert_ne!(a.scene, b.scene);
+    assert_eq!(
+        object_ids(&a.scene),
+        vec![ObjectId::new(2), ObjectId::new(5)]
+    );
+    assert_eq!(object_ids(&a.scene), object_ids(&b.scene));
+}
+
+#[test]
+fn per_frame_flag_controls_transform_variation() {
+    let scene = randomizable_scene();
+    let per_frame = randomization_config(true);
+    let per_dataset = randomization_config(false);
+
+    let frame_one = randomize_scene_for_frame(&scene, &per_frame, 1234, 1);
+    let frame_two = randomize_scene_for_frame(&scene, &per_frame, 1234, 2);
+    let fixed_one = randomize_scene_for_frame(&scene, &per_dataset, 1234, 1);
+    let fixed_two = randomize_scene_for_frame(&scene, &per_dataset, 1234, 2);
+
+    assert_ne!(frame_one.scene, frame_two.scene);
+    assert_eq!(fixed_one.scene, fixed_two.scene);
+    assert_eq!(fixed_one.frame_seed, fixed_two.frame_seed);
+}
+
+#[test]
+fn camera_randomization_is_deterministic_and_changes_intrinsics() {
+    let mut config = randomization_config(true);
+    config.camera.enabled = true;
+    config.camera.pose_jitter = Vec3::new(0.05, 0.02, 0.05);
+    config.camera.fov_degrees_range = Some([40.0, 44.0]);
+    let camera = Camera::default_rgb().with_resolution(320, 180);
+
+    let a = randomize_camera_for_frame(camera, &config, 1234, 1);
+    let b = randomize_camera_for_frame(camera, &config, 1234, 1);
+
+    assert_eq!(a, b);
+    assert_ne!(a.position, camera.position);
+    assert!((40.0..=44.0).contains(&a.vertical_fov_degrees));
+}
+
+#[test]
+fn randomized_boxes_config_parses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/datasets/randomized_boxes.json");
+    let config: DatasetConfig = serde_json::from_str(&std::fs::read_to_string(path).unwrap())
+        .expect("randomized_boxes config should parse");
+
+    assert_eq!(
+        config.scene_path.as_deref(),
+        Some(std::path::Path::new("examples/scenes/boxes_scene.json"))
+    );
+    assert!(config.domain_randomization.enabled);
+    assert!(config.domain_randomization.per_frame);
+    assert!(config.domain_randomization.object_transforms.enabled);
+    assert!(config.domain_randomization.materials.enabled);
+    assert!(config.domain_randomization.camera.enabled);
+}
+
+#[test]
+fn manifest_includes_randomization_config() {
+    let config = randomization_config(true);
+    let manifest = DatasetManifest::new(
+        1,
+        320,
+        180,
+        1234,
+        CameraPathConfig::static_default(),
+        OutputSelection::all(),
+    )
+    .with_domain_randomization(config.clone())
+    .with_object_ids(vec![ObjectIdMetadata::new(0, "background")])
+    .with_frames(vec![frame_output_paths(1).to_manifest_frame(1)]);
+
+    assert_eq!(manifest.domain_randomization.as_ref(), Some(&config));
+}
+
+#[test]
+fn validation_accepts_randomized_dataset_metadata() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = DatasetConfig {
+        frame_count: 1,
+        width: 2,
+        height: 1,
+        domain_randomization: randomization_config(true),
+        ..DatasetConfig::default()
+    };
+    let mut writer = DatasetWriter::new_with_config(
+        temp_dir.path(),
+        config.clone(),
+        Some("examples/scenes/boxes_scene.json".to_string()),
+        Some("examples/datasets/randomized_boxes.json".to_string()),
+        "cpu-preview".to_string(),
+        vec![
+            ObjectIdMetadata::new(0, "background"),
+            ObjectIdMetadata::new(5, "red box").with_primitive("box"),
+        ],
+    )
+    .unwrap();
+    let scene = randomizable_scene();
+    let randomized = randomize_scene_for_frame(&scene, &config.domain_randomization, 1234, 1);
+    let camera = Camera::default_rgb().with_resolution(2, 1);
+    let paths = frame_output_paths(1);
+    let metadata = sim_datasets::DatasetFrameMetadata::new(
+        1,
+        0.0,
+        "rgb-main",
+        1234,
+        &config.camera_path,
+        &camera,
+        &paths,
+        Some("examples/scenes/boxes_scene.json".to_string()),
+        vec![
+            ObjectIdMetadata::new(0, "background"),
+            ObjectIdMetadata::new(5, "red box").with_primitive("box"),
+        ],
+        Some("cpu-preview".to_string()),
+    )
+    .with_randomization(randomized.metadata);
+    let images = SensorImageSet {
+        rgb: RgbImage::new(2, 1, vec![0, 0]).unwrap(),
+        depth: DepthImage::new(2, 1, vec![0.0, 1.0]).unwrap(),
+        segmentation: SegmentationImage::new(2, 1, vec![0, 5]).unwrap(),
+    };
+
+    writer.write_sensor_outputs(1, &images, &metadata).unwrap();
+    writer.finish().unwrap();
+
+    let report = validate_dataset(temp_dir.path()).unwrap();
+    assert_eq!(report.frame_count, 1);
+}
+
+fn randomization_config(per_frame: bool) -> DomainRandomizationConfig {
+    DomainRandomizationConfig {
+        enabled: true,
+        seed: None,
+        per_frame,
+        object_transforms: ObjectTransformRandomization {
+            enabled: true,
+            position_jitter: Vec3::new(0.25, 0.0, 0.25),
+            scale_range: [0.8, 1.2],
+            include_planes: false,
+        },
+        ..DomainRandomizationConfig::default()
+    }
+}
+
+fn randomizable_scene() -> Scene {
+    let mut scene = Scene::new();
+    scene.add_entity(Entity::new(
+        "red sphere",
+        PrimitiveShape::sphere(0.5),
+        Transform::from_translation(Vec3::new(-0.5, 0.5, -1.5)),
+        Material::matte(Vec3::new(0.9, 0.1, 0.1)),
+        ObjectId::new(2),
+    ));
+    scene.add_entity(Entity::new(
+        "red box",
+        PrimitiveShape::box_with_half_extents(Vec3::splat(0.4)),
+        Transform::from_translation(Vec3::new(0.5, 0.4, -1.6)),
+        Material::metal_preview(Vec3::new(0.7, 0.72, 0.76), 0.25),
+        ObjectId::new(5),
+    ));
+    scene
+}
+
+fn object_ids(scene: &Scene) -> Vec<ObjectId> {
+    scene
+        .entities()
+        .map(|entity| entity.object_id)
+        .collect::<Vec<_>>()
 }
