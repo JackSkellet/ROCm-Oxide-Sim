@@ -7,9 +7,11 @@
 //! - Depth: linear `f32` distance in meters along the camera ray, with `0.0`
 //!   for background/miss pixels.
 //! - Segmentation: stable `u32` object IDs, with `0` for background/miss pixels.
+//! - LiDAR: linear range in meters per ray, with `0.0` for miss/no return;
+//!   miss points are `Vec3::ZERO` and miss object IDs are `0`.
 
 use serde::{Deserialize, Serialize};
-use sim_core::{Camera, ObjectId, PrimitiveShape, Scene, Vec3};
+use sim_core::{Camera, ObjectId, PrimitiveShape, Scene, Transform, Vec3};
 use std::collections::BTreeMap;
 
 /// Shared interface for configured simulator sensors.
@@ -61,6 +63,14 @@ impl SensorPose {
             position: camera.position,
             forward: camera.forward,
             up: camera.up,
+        }
+    }
+
+    pub fn from_transform(transform: Transform) -> Self {
+        Self {
+            position: transform.translation,
+            forward: transform.transform_direction(Vec3::new(0.0, 0.0, -1.0)),
+            up: transform.transform_direction(Vec3::Y),
         }
     }
 }
@@ -258,6 +268,196 @@ pub type DepthFrame = SensorFrame<f32>;
 pub type SegmentationFrame = SensorFrame<u32>;
 
 pub type SegmentationId = u32;
+
+/// Stable `u32` LiDAR return object ID. `0` means miss/background.
+pub type LidarObjectId = u32;
+
+/// Configured single-return spinning/raster LiDAR.
+///
+/// The scan is a deterministic spherical grid: horizontal samples sweep yaw,
+/// vertical channels sweep pitch, both centered around the sensor transform's
+/// local `-Z` forward axis. Range values are linear ray distance in meters.
+/// Miss/no-return samples use `0.0` range, `Vec3::ZERO` point, and object ID
+/// `0`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LidarConfig {
+    #[serde(default = "default_lidar_horizontal_samples")]
+    pub horizontal_samples: u32,
+    #[serde(default = "default_lidar_vertical_channels")]
+    pub vertical_channels: u32,
+    #[serde(default = "default_lidar_horizontal_fov_degrees")]
+    pub horizontal_fov_degrees: f32,
+    #[serde(default = "default_lidar_vertical_fov_degrees")]
+    pub vertical_fov_degrees: f32,
+    #[serde(default = "default_lidar_min_range_m")]
+    pub min_range_m: f32,
+    #[serde(default = "default_lidar_max_range_m")]
+    pub max_range_m: f32,
+    #[serde(default)]
+    pub pose: Transform,
+}
+
+fn default_lidar_horizontal_samples() -> u32 {
+    512
+}
+
+fn default_lidar_vertical_channels() -> u32 {
+    32
+}
+
+fn default_lidar_horizontal_fov_degrees() -> f32 {
+    360.0
+}
+
+fn default_lidar_vertical_fov_degrees() -> f32 {
+    30.0
+}
+
+fn default_lidar_min_range_m() -> f32 {
+    0.1
+}
+
+fn default_lidar_max_range_m() -> f32 {
+    50.0
+}
+
+impl Default for LidarConfig {
+    fn default() -> Self {
+        Self {
+            horizontal_samples: default_lidar_horizontal_samples(),
+            vertical_channels: default_lidar_vertical_channels(),
+            horizontal_fov_degrees: default_lidar_horizontal_fov_degrees(),
+            vertical_fov_degrees: default_lidar_vertical_fov_degrees(),
+            min_range_m: default_lidar_min_range_m(),
+            max_range_m: default_lidar_max_range_m(),
+            pose: Transform::default(),
+        }
+    }
+}
+
+impl LidarConfig {
+    pub fn normalized(mut self) -> Self {
+        self.horizontal_samples = self.horizontal_samples.max(1);
+        self.vertical_channels = self.vertical_channels.max(1);
+        self.horizontal_fov_degrees = self.horizontal_fov_degrees.clamp(0.0, 360.0);
+        self.vertical_fov_degrees = self.vertical_fov_degrees.clamp(0.0, 180.0);
+        self.min_range_m = self.min_range_m.max(0.0);
+        self.max_range_m = self.max_range_m.max(self.min_range_m);
+        self
+    }
+
+    pub fn sample_count(self) -> usize {
+        self.horizontal_samples as usize * self.vertical_channels as usize
+    }
+
+    pub fn pose(self) -> SensorPose {
+        SensorPose::from_transform(self.pose)
+    }
+}
+
+/// Host LiDAR frame with one range, point, and object ID per emitted ray.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LidarFrame {
+    pub width: u32,
+    pub height: u32,
+    pub metadata: FrameMetadata,
+    pub ranges_m: Vec<f32>,
+    pub points_xyz: Vec<Vec3>,
+    pub object_ids: Vec<LidarObjectId>,
+}
+
+impl LidarFrame {
+    pub fn new(
+        width: u32,
+        height: u32,
+        metadata: FrameMetadata,
+        ranges_m: Vec<f32>,
+        points_xyz: Vec<Vec3>,
+        object_ids: Vec<LidarObjectId>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            metadata,
+            ranges_m,
+            points_xyz,
+            object_ids,
+        }
+    }
+
+    pub fn from_config(
+        config: LidarConfig,
+        metadata: FrameMetadata,
+        ranges_m: Vec<f32>,
+        points_xyz: Vec<Vec3>,
+        object_ids: Vec<LidarObjectId>,
+    ) -> Self {
+        let config = config.normalized();
+        Self::new(
+            config.horizontal_samples,
+            config.vertical_channels,
+            metadata,
+            ranges_m,
+            points_xyz,
+            object_ids,
+        )
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.width as usize * self.height as usize
+    }
+
+    pub fn miss_sample_count(&self) -> usize {
+        self.ranges_m
+            .iter()
+            .zip(&self.points_xyz)
+            .zip(&self.object_ids)
+            .filter(|&((&range, &point), &object_id)| {
+                range == 0.0 && point == Vec3::ZERO && object_id == 0
+            })
+            .count()
+    }
+}
+
+/// Configured LiDAR/raycast sensor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LidarSensor {
+    id: String,
+    config: LidarConfig,
+}
+
+impl LidarSensor {
+    pub fn new(id: impl Into<String>, config: LidarConfig) -> Self {
+        Self {
+            id: id.into(),
+            config: config.normalized(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn config(&self) -> LidarConfig {
+        self.config
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.config.sample_count()
+    }
+}
+
+impl Sensor for LidarSensor {
+    type Output = LidarFrame;
+
+    fn id(&self) -> &str {
+        self.id()
+    }
+
+    fn pose(&self) -> SensorPose {
+        self.config.pose()
+    }
+}
 
 /// Configured RGB camera sensor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

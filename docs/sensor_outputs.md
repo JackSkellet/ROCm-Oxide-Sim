@@ -1,9 +1,9 @@
 # Sensor Outputs
 
-Milestone 1 defines three image-like sensor outputs. Later milestones keep the
-same contracts while sourcing hits from uploaded `sim-core::Scene` geometry. The
-ROCm renderer writes all three in one deterministic HIPRTC pass when built with
-`--features rocm`.
+Milestone 1 defined three image-like sensor outputs. Later milestones keep the
+same contracts while sourcing hits from uploaded `sim-core::Scene` geometry.
+Milestone 6A adds a single-return LiDAR/raycast output using the same uploaded
+scene buffers.
 
 ## RGB
 
@@ -37,6 +37,47 @@ width * height * 4 bytes
 Segmentation preview files are binary PPM (`P6`) images using a stable color
 mapping.
 
+## LiDAR
+
+LiDAR frames are deterministic spherical scans. Horizontal samples sweep yaw and
+vertical channels sweep pitch around the sensor transform's local `-Z` forward
+axis. The current default is:
+
+```text
+horizontal_samples = 512
+vertical_channels = 32
+horizontal_fov_degrees = 360.0
+vertical_fov_degrees = 30.0
+min_range_m = 0.1
+max_range_m = 50.0
+```
+
+Each emitted ray stores:
+
+- `ranges_m`: `f32` linear ray distance in meters.
+- `points_xyz`: world-space XYZ point for the first hit.
+- `object_ids`: stable `u32` object ID for the hit primitive.
+
+Miss/no-return samples use:
+
+```text
+range = 0.0
+point = 0.0 0.0 0.0
+object_id = 0
+```
+
+Dataset LiDAR files are:
+
+```text
+lidar_range/frame_000001.f32          raw little-endian f32 values
+lidar_points/frame_000001.xyz         text XYZ rows, one point per ray
+lidar_object_ids/frame_000001.u32     raw little-endian u32 values
+lidar_preview/frame_000001.pgm        per-frame normalized range preview
+```
+
+The preview maps misses to black and finite positive returns from bright
+near-range values to dim farther-range values.
+
 ## Object IDs
 
 Segmentation IDs come from each `sim-core::Entity` `ObjectId`. Metadata is
@@ -67,7 +108,8 @@ generated from the active scene:
 
 The renderer currently supports uploaded sphere, plane, and axis-aligned box
 primitives. Box rotation is ignored. Meshes, OpenUSD assets, URDF robot
-geometry, and dynamic GPU scene mutation are not implemented yet.
+geometry, dynamic GPU scene mutation, LiDAR noise, multi-return LiDAR, and
+rolling scan timing are not implemented yet.
 
 Dataset metadata records the active scene object ID map for every generated
 frame and repeats the depth/segmentation conventions in `dataset_manifest.json`

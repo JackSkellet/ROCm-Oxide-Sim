@@ -67,31 +67,41 @@
   exists.
 - Documented the current per-frame scene upload strategy.
 
-## Milestone 5C: LiDAR/Raycast Sensor
+## Milestone 6A: LiDAR/Raycast Sensor (Completed)
 
-- Add raycast/LiDAR sensor traits and output contracts.
-- Reuse uploaded scene primitive intersection where practical.
-- Keep mesh/BVH support deferred until primitive raycasts are stable.
+- Added LiDAR sensor config and frame contracts with explicit miss convention.
+- Added ROCm single-return LiDAR/raycast kernel over uploaded scene primitive
+  buffers.
+- Added dataset exports for range, XYZ points, object IDs, and range previews.
+- Added LiDAR config, metadata, manifest, and validation support.
+- Kept mesh/BVH, noise, multi-return, and robot-relative rig semantics deferred.
 
-## Milestone 6: Physics Adapter
+## Milestone 6B: SensorRig + ScenarioConfig
+
+- Define reusable rigs that attach cameras and LiDAR sensors to a common frame.
+- Add scenario-level config that composes scene, camera path, LiDAR config,
+  output selection, and randomization.
+- Keep app orchestration outside the core renderer.
+
+## Milestone 7: Physics Adapter
 
 - Add rigid body descriptors and scene synchronization.
 - Integrate a first lightweight backend, likely Rapier.
 - Keep the backend behind traits.
 
-## Milestone 7: Robot Model / URDF
+## Milestone 8: Robot Model / URDF
 
 - Define robot model data structures.
 - Import URDF or a minimal subset.
 - Map robot links to renderable entities and physics bodies.
 
-## Milestone 8: ROS2 Bridge
+## Milestone 9: ROS2 Bridge
 
 - Add optional ROS2 publishing/subscription crates.
 - Export sensor streams with explicit timestamp and frame ID conventions.
 - Keep ROS2 optional so core tests remain dependency-light.
 
-## Milestone 9: Robotics-Lab App Integration
+## Milestone 10: Robotics-Lab App Integration
 
 - Build the higher-level application on top of this framework.
 - Compose scenes, sensors, datasets, viewer, physics, robots, and ROS2.

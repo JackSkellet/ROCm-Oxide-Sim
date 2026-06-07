@@ -9,6 +9,10 @@
 //!   depth_preview/frame_000001.pgm
 //!   segmentation/frame_000001.u32
 //!   segmentation_preview/frame_000001.ppm
+//!   lidar_range/frame_000001.f32
+//!   lidar_points/frame_000001.xyz
+//!   lidar_object_ids/frame_000001.u32
+//!   lidar_preview/frame_000001.pgm
 //!   metadata/frame_000001.json
 //!   dataset_manifest.json
 //! ```
@@ -16,8 +20,8 @@
 use serde::{Deserialize, Serialize};
 use sim_core::{Camera, MaterialKind, PrimitiveShape, Scene, Transform, Vec3};
 use sim_sensors::{
-    CameraIntrinsics, DepthFrame, FrameMetadata, FrameOutputMetadata, ObjectIdMetadata, RgbFrame,
-    SegmentationFrame,
+    CameraIntrinsics, DepthFrame, FrameMetadata, FrameOutputMetadata, LidarConfig, LidarFrame,
+    ObjectIdMetadata, RgbFrame, SegmentationFrame,
 };
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -97,6 +101,101 @@ impl OutputSelection {
 impl Default for OutputSelection {
     fn default() -> Self {
         Self::all()
+    }
+}
+
+/// Optional LiDAR output configuration for dataset generation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DatasetLidarConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_lidar_horizontal_samples")]
+    pub horizontal_samples: u32,
+    #[serde(default = "default_lidar_vertical_channels")]
+    pub vertical_channels: u32,
+    #[serde(default = "default_lidar_horizontal_fov_degrees")]
+    pub horizontal_fov_degrees: f32,
+    #[serde(default = "default_lidar_vertical_fov_degrees")]
+    pub vertical_fov_degrees: f32,
+    #[serde(default = "default_lidar_min_range_m")]
+    pub min_range_m: f32,
+    #[serde(default = "default_lidar_max_range_m")]
+    pub max_range_m: f32,
+    #[serde(default)]
+    pub pose: Transform,
+}
+
+fn default_lidar_horizontal_samples() -> u32 {
+    LidarConfig::default().horizontal_samples
+}
+
+fn default_lidar_vertical_channels() -> u32 {
+    LidarConfig::default().vertical_channels
+}
+
+fn default_lidar_horizontal_fov_degrees() -> f32 {
+    LidarConfig::default().horizontal_fov_degrees
+}
+
+fn default_lidar_vertical_fov_degrees() -> f32 {
+    LidarConfig::default().vertical_fov_degrees
+}
+
+fn default_lidar_min_range_m() -> f32 {
+    LidarConfig::default().min_range_m
+}
+
+fn default_lidar_max_range_m() -> f32 {
+    LidarConfig::default().max_range_m
+}
+
+impl DatasetLidarConfig {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            horizontal_samples: default_lidar_horizontal_samples(),
+            vertical_channels: default_lidar_vertical_channels(),
+            horizontal_fov_degrees: default_lidar_horizontal_fov_degrees(),
+            vertical_fov_degrees: default_lidar_vertical_fov_degrees(),
+            min_range_m: default_lidar_min_range_m(),
+            max_range_m: default_lidar_max_range_m(),
+            pose: Transform::default(),
+        }
+    }
+
+    pub fn normalized(mut self) -> Self {
+        let config = self.to_lidar_config().normalized();
+        self.horizontal_samples = config.horizontal_samples;
+        self.vertical_channels = config.vertical_channels;
+        self.horizontal_fov_degrees = config.horizontal_fov_degrees;
+        self.vertical_fov_degrees = config.vertical_fov_degrees;
+        self.min_range_m = config.min_range_m;
+        self.max_range_m = config.max_range_m;
+        self.pose = config.pose;
+        self
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
+
+    pub fn to_lidar_config(self) -> LidarConfig {
+        LidarConfig {
+            horizontal_samples: self.horizontal_samples,
+            vertical_channels: self.vertical_channels,
+            horizontal_fov_degrees: self.horizontal_fov_degrees,
+            vertical_fov_degrees: self.vertical_fov_degrees,
+            min_range_m: self.min_range_m,
+            max_range_m: self.max_range_m,
+            pose: self.pose,
+        }
+        .normalized()
+    }
+}
+
+impl Default for DatasetLidarConfig {
+    fn default() -> Self {
+        Self::disabled()
     }
 }
 
@@ -396,6 +495,8 @@ pub struct DatasetConfig {
     pub domain_randomization: DomainRandomizationConfig,
     #[serde(default)]
     pub outputs: OutputSelection,
+    #[serde(default, skip_serializing_if = "DatasetLidarConfig::is_disabled")]
+    pub lidar: DatasetLidarConfig,
 }
 
 impl Default for DatasetConfig {
@@ -410,6 +511,7 @@ impl Default for DatasetConfig {
             seed: 0,
             domain_randomization: DomainRandomizationConfig::default(),
             outputs: OutputSelection::all(),
+            lidar: DatasetLidarConfig::default(),
         }
     }
 }
@@ -420,6 +522,7 @@ impl DatasetConfig {
         self.width = self.width.max(1);
         self.height = self.height.max(1);
         self.outputs = self.outputs.normalized();
+        self.lidar = self.lidar.normalized();
         self
     }
 }
@@ -748,6 +851,14 @@ pub struct FrameOutputPaths {
     pub segmentation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segmentation_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_points: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_object_ids: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_preview: Option<String>,
     pub metadata: String,
 }
 
@@ -760,6 +871,10 @@ impl FrameOutputPaths {
             depth_preview: self.depth_preview.clone(),
             segmentation: self.segmentation.clone(),
             segmentation_preview: self.segmentation_preview.clone(),
+            lidar_range: self.lidar_range.clone(),
+            lidar_points: self.lidar_points.clone(),
+            lidar_object_ids: self.lidar_object_ids.clone(),
+            lidar_preview: self.lidar_preview.clone(),
             metadata: self.metadata.clone(),
         }
     }
@@ -797,6 +912,34 @@ impl FrameOutputPaths {
                 path.clone(),
             ));
         }
+        if let Some(path) = &self.lidar_range {
+            outputs.push(FrameOutputMetadata::new(
+                "lidar_range",
+                "raw-f32-little-endian",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &self.lidar_points {
+            outputs.push(FrameOutputMetadata::new(
+                "lidar_points",
+                "xyz",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &self.lidar_object_ids {
+            outputs.push(FrameOutputMetadata::new(
+                "lidar_object_ids",
+                "raw-u32-little-endian",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &self.lidar_preview {
+            outputs.push(FrameOutputMetadata::new(
+                "lidar_preview",
+                "pgm",
+                path.clone(),
+            ));
+        }
         outputs.push(FrameOutputMetadata::new(
             "metadata",
             "json",
@@ -814,6 +957,18 @@ pub fn frame_output_paths_for_selection(
     frame_index: u64,
     outputs: OutputSelection,
 ) -> FrameOutputPaths {
+    frame_output_paths_for_selection_and_lidar(frame_index, outputs, false)
+}
+
+pub fn frame_output_paths_for_config(frame_index: u64, config: &DatasetConfig) -> FrameOutputPaths {
+    frame_output_paths_for_selection_and_lidar(frame_index, config.outputs, config.lidar.enabled)
+}
+
+pub fn frame_output_paths_for_selection_and_lidar(
+    frame_index: u64,
+    outputs: OutputSelection,
+    lidar_enabled: bool,
+) -> FrameOutputPaths {
     let file_stem = format!("frame_{frame_index:06}");
     let outputs = outputs.normalized();
     FrameOutputPaths {
@@ -828,6 +983,10 @@ pub fn frame_output_paths_for_selection(
         segmentation_preview: outputs
             .segmentation_preview
             .then(|| format!("segmentation_preview/{file_stem}.ppm")),
+        lidar_range: lidar_enabled.then(|| format!("lidar_range/{file_stem}.f32")),
+        lidar_points: lidar_enabled.then(|| format!("lidar_points/{file_stem}.xyz")),
+        lidar_object_ids: lidar_enabled.then(|| format!("lidar_object_ids/{file_stem}.u32")),
+        lidar_preview: lidar_enabled.then(|| format!("lidar_preview/{file_stem}.pgm")),
         metadata: format!("metadata/{file_stem}.json"),
     }
 }
@@ -860,6 +1019,85 @@ impl SegmentationConventionMetadata {
         Self {
             convention: "u32 object IDs".to_string(),
             background_id: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LidarConventionMetadata {
+    pub range_convention: String,
+    pub point_convention: String,
+    pub object_id_convention: String,
+    pub range_units: String,
+    pub miss_range_m: f32,
+    pub miss_point: Vec3,
+    pub miss_object_id: u32,
+}
+
+impl LidarConventionMetadata {
+    pub fn single_return_linear_range() -> Self {
+        Self {
+            range_convention: "linear LiDAR ray distance".to_string(),
+            point_convention: "world-space XYZ point at first hit".to_string(),
+            object_id_convention: "u32 object IDs".to_string(),
+            range_units: "meters".to_string(),
+            miss_range_m: 0.0,
+            miss_point: Vec3::ZERO,
+            miss_object_id: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LidarFrameMetadata {
+    pub enabled: bool,
+    pub horizontal_samples: u32,
+    pub vertical_channels: u32,
+    pub horizontal_fov_degrees: f32,
+    pub vertical_fov_degrees: f32,
+    pub min_range_m: f32,
+    pub max_range_m: f32,
+    pub pose: Transform,
+    pub convention: LidarConventionMetadata,
+    pub outputs: Vec<FrameOutputMetadata>,
+}
+
+impl LidarFrameMetadata {
+    pub fn new(config: DatasetLidarConfig, paths: &FrameOutputPaths) -> Self {
+        let config = config.normalized();
+        let mut outputs = Vec::new();
+        if let Some(path) = &paths.lidar_range {
+            outputs.push(FrameOutputMetadata::new(
+                "range",
+                "raw-f32-little-endian",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &paths.lidar_points {
+            outputs.push(FrameOutputMetadata::new("points", "xyz", path.clone()));
+        }
+        if let Some(path) = &paths.lidar_object_ids {
+            outputs.push(FrameOutputMetadata::new(
+                "object_ids",
+                "raw-u32-little-endian",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &paths.lidar_preview {
+            outputs.push(FrameOutputMetadata::new("preview", "pgm", path.clone()));
+        }
+
+        Self {
+            enabled: config.enabled,
+            horizontal_samples: config.horizontal_samples,
+            vertical_channels: config.vertical_channels,
+            horizontal_fov_degrees: config.horizontal_fov_degrees,
+            vertical_fov_degrees: config.vertical_fov_degrees,
+            min_range_m: config.min_range_m,
+            max_range_m: config.max_range_m,
+            pose: config.pose,
+            convention: LidarConventionMetadata::single_return_linear_range(),
+            outputs,
         }
     }
 }
@@ -904,6 +1142,8 @@ pub struct DatasetFrameMetadata {
     pub depth_convention: DepthConventionMetadata,
     pub segmentation_convention: SegmentationConventionMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar: Option<LidarFrameMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_randomization: Option<DomainRandomizationFrameMetadata>,
 }
 
@@ -935,12 +1175,18 @@ impl DatasetFrameMetadata {
             renderer_backend,
             depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
             segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
+            lidar: None,
             domain_randomization: None,
         }
     }
 
     pub fn with_randomization(mut self, randomization: DomainRandomizationFrameMetadata) -> Self {
         self.domain_randomization = Some(randomization);
+        self
+    }
+
+    pub fn with_lidar(mut self, lidar: LidarFrameMetadata) -> Self {
+        self.lidar = Some(lidar);
         self
     }
 }
@@ -1130,6 +1376,42 @@ impl SensorImageSet {
     }
 }
 
+pub fn synthetic_lidar_frame(
+    config: LidarConfig,
+    frame_index: u64,
+    metadata: FrameMetadata,
+) -> LidarFrame {
+    let config = config.normalized();
+    let mut ranges_m = Vec::with_capacity(config.sample_count());
+    let mut points_xyz = Vec::with_capacity(config.sample_count());
+    let mut object_ids = Vec::with_capacity(config.sample_count());
+    for y in 0..config.vertical_channels {
+        for x in 0..config.horizontal_samples {
+            let miss = ((x / 16) + y + frame_index as u32) % 11 == 0;
+            if miss {
+                ranges_m.push(0.0);
+                points_xyz.push(Vec3::ZERO);
+                object_ids.push(0);
+            } else {
+                let nx = x as f32 / config.horizontal_samples.max(1) as f32;
+                let ny = y as f32 / config.vertical_channels.max(1) as f32;
+                let range = 2.0 + nx * 8.0 + ny * 3.0;
+                ranges_m.push(range);
+                points_xyz.push(Vec3::new(nx - 0.5, ny - 0.5, -range));
+                object_ids.push(1 + ((x + y + frame_index as u32) % 4));
+            }
+        }
+    }
+    LidarFrame::new(
+        config.horizontal_samples,
+        config.vertical_channels,
+        metadata,
+        ranges_m,
+        points_xyz,
+        object_ids,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestFrame {
     pub frame_index: u64,
@@ -1143,6 +1425,14 @@ pub struct ManifestFrame {
     pub segmentation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segmentation_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_points: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_object_ids: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_preview: Option<String>,
     pub metadata: String,
 }
 
@@ -1164,6 +1454,10 @@ pub struct DatasetManifest {
     pub frames: Vec<ManifestFrame>,
     pub depth_convention: DepthConventionMetadata,
     pub segmentation_convention: SegmentationConventionMetadata,
+    #[serde(default, skip_serializing_if = "DatasetLidarConfig::is_disabled")]
+    pub lidar: DatasetLidarConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lidar_convention: Option<LidarConventionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_randomization: Option<DomainRandomizationConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1194,6 +1488,8 @@ impl DatasetManifest {
             frames: Vec::new(),
             depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
             segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
+            lidar: DatasetLidarConfig::default(),
+            lidar_convention: None,
             domain_randomization: None,
             renderer_backend: None,
         }
@@ -1227,6 +1523,15 @@ impl DatasetManifest {
 
     pub fn with_domain_randomization(mut self, randomization: DomainRandomizationConfig) -> Self {
         self.domain_randomization = randomization.enabled.then_some(randomization);
+        self
+    }
+
+    pub fn with_lidar(mut self, lidar: DatasetLidarConfig) -> Self {
+        self.lidar = lidar.normalized();
+        self.lidar_convention = self
+            .lidar
+            .enabled
+            .then(LidarConventionMetadata::single_return_linear_range);
         self
     }
 }
@@ -1280,6 +1585,12 @@ impl DatasetWriter {
         if config.outputs.segmentation_preview {
             fs::create_dir_all(root.join("segmentation_preview"))?;
         }
+        if config.lidar.enabled {
+            fs::create_dir_all(root.join("lidar_range"))?;
+            fs::create_dir_all(root.join("lidar_points"))?;
+            fs::create_dir_all(root.join("lidar_object_ids"))?;
+            fs::create_dir_all(root.join("lidar_preview"))?;
+        }
         fs::create_dir_all(root.join("metadata"))?;
         Ok(Self {
             root,
@@ -1325,7 +1636,17 @@ impl DatasetWriter {
         images: &SensorImageSet,
         metadata: &impl Serialize,
     ) -> Result<()> {
-        let paths = frame_output_paths_for_selection(frame_index, self.config.outputs);
+        self.write_dataset_outputs(frame_index, images, None, metadata)
+    }
+
+    pub fn write_dataset_outputs(
+        &mut self,
+        frame_index: u64,
+        images: &SensorImageSet,
+        lidar: Option<&LidarFrame>,
+        metadata: &impl Serialize,
+    ) -> Result<()> {
+        let paths = frame_output_paths_for_config(frame_index, &self.config);
 
         if let Some(path) = &paths.rgb {
             write_ppm(self.root.join(path), &images.rgb)?;
@@ -1341,6 +1662,26 @@ impl DatasetWriter {
         }
         if let Some(path) = &paths.segmentation_preview {
             write_segmentation_preview_ppm(self.root.join(path), &images.segmentation)?;
+        }
+        if self.config.lidar.enabled {
+            let lidar = lidar.ok_or_else(|| {
+                DatasetError::InvalidImage(
+                    "LiDAR is enabled in dataset config, but no LiDAR frame was provided"
+                        .to_string(),
+                )
+            })?;
+            if let Some(path) = &paths.lidar_range {
+                write_lidar_range_f32(self.root.join(path), lidar)?;
+            }
+            if let Some(path) = &paths.lidar_points {
+                write_lidar_points_xyz(self.root.join(path), lidar)?;
+            }
+            if let Some(path) = &paths.lidar_object_ids {
+                write_lidar_object_ids_u32(self.root.join(path), lidar)?;
+            }
+            if let Some(path) = &paths.lidar_preview {
+                write_lidar_preview_pgm(self.root.join(path), lidar)?;
+            }
         }
         write_metadata_json(self.root.join(&paths.metadata), metadata)?;
 
@@ -1361,6 +1702,7 @@ impl DatasetWriter {
         .with_config_path(self.config_path.clone())
         .with_object_ids(self.object_ids.clone())
         .with_frames(self.frames.clone())
+        .with_lidar(self.config.lidar)
         .with_domain_randomization(self.config.domain_randomization.clone());
         manifest.renderer_backend = Some(self.renderer_backend.clone());
         let path = self.root.join("dataset_manifest.json");
@@ -1462,6 +1804,110 @@ pub fn write_segmentation_preview_ppm(
     write_ppm(path, &preview)
 }
 
+pub fn write_lidar_range_f32(path: impl AsRef<Path>, frame: &LidarFrame) -> Result<()> {
+    validate_lidar_frame(frame)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for &sample in &frame.ranges_m {
+        writer.write_all(&sample.to_le_bytes())?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn write_lidar_object_ids_u32(path: impl AsRef<Path>, frame: &LidarFrame) -> Result<()> {
+    validate_lidar_frame(frame)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for &sample in &frame.object_ids {
+        writer.write_all(&sample.to_le_bytes())?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn write_lidar_points_xyz(path: impl AsRef<Path>, frame: &LidarFrame) -> Result<()> {
+    validate_lidar_frame(frame)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for point in &frame.points_xyz {
+        writeln!(writer, "{} {} {}", point.x, point.y, point.z)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn write_lidar_preview_pgm(path: impl AsRef<Path>, frame: &LidarFrame) -> Result<()> {
+    validate_lidar_frame(frame)?;
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    write!(writer, "P5\n{} {}\n255\n", frame.width, frame.height)?;
+    writer.write_all(&lidar_range_preview_pixels(frame))?;
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn lidar_range_preview_pixels(frame: &LidarFrame) -> Vec<u8> {
+    let finite_positive = frame
+        .ranges_m
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let (mut min_range, mut max_range) = (f32::INFINITY, f32::NEG_INFINITY);
+    for value in finite_positive {
+        min_range = min_range.min(value);
+        max_range = max_range.max(value);
+    }
+
+    if !min_range.is_finite() || !max_range.is_finite() {
+        return vec![0; frame.ranges_m.len()];
+    }
+
+    frame
+        .ranges_m
+        .iter()
+        .map(|&value| {
+            if !value.is_finite() || value <= 0.0 {
+                return 0;
+            }
+            if (max_range - min_range).abs() <= f32::EPSILON {
+                return 255;
+            }
+            let normalized = (value - min_range) / (max_range - min_range);
+            (255.0 - normalized * 223.0).round().clamp(32.0, 255.0) as u8
+        })
+        .collect()
+}
+
+fn validate_lidar_frame(frame: &LidarFrame) -> Result<()> {
+    let expected = frame.sample_count();
+    if frame.ranges_m.len() != expected {
+        return Err(DatasetError::InvalidImage(format!(
+            "expected {expected} LiDAR range samples for {}x{}, got {}",
+            frame.width,
+            frame.height,
+            frame.ranges_m.len()
+        )));
+    }
+    if frame.points_xyz.len() != expected {
+        return Err(DatasetError::InvalidImage(format!(
+            "expected {expected} LiDAR point samples for {}x{}, got {}",
+            frame.width,
+            frame.height,
+            frame.points_xyz.len()
+        )));
+    }
+    if frame.object_ids.len() != expected {
+        return Err(DatasetError::InvalidImage(format!(
+            "expected {expected} LiDAR object ID samples for {}x{}, got {}",
+            frame.width,
+            frame.height,
+            frame.object_ids.len()
+        )));
+    }
+    Ok(())
+}
+
 pub fn segmentation_color(object_id: u32) -> u32 {
     match object_id {
         0 => 0x0000_0000,
@@ -1532,6 +1978,7 @@ pub fn validate_dataset(
         .domain_randomization
         .as_ref()
         .is_some_and(|config| config.enabled);
+    let lidar_enabled = manifest.lidar.enabled;
 
     for frame in &manifest.frames {
         check_optional_file(root, frame.rgb.as_deref())?;
@@ -1539,6 +1986,21 @@ pub fn validate_dataset(
         check_optional_file(root, frame.depth_preview.as_deref())?;
         check_optional_file(root, frame.segmentation.as_deref())?;
         check_optional_file(root, frame.segmentation_preview.as_deref())?;
+        if lidar_enabled {
+            check_required_optional_file(root, frame.lidar_range.as_deref(), "lidar_range")?;
+            check_required_optional_file(root, frame.lidar_points.as_deref(), "lidar_points")?;
+            check_required_optional_file(
+                root,
+                frame.lidar_object_ids.as_deref(),
+                "lidar_object_ids",
+            )?;
+            check_required_optional_file(root, frame.lidar_preview.as_deref(), "lidar_preview")?;
+        } else {
+            check_optional_file(root, frame.lidar_range.as_deref())?;
+            check_optional_file(root, frame.lidar_points.as_deref())?;
+            check_optional_file(root, frame.lidar_object_ids.as_deref())?;
+            check_optional_file(root, frame.lidar_preview.as_deref())?;
+        }
         check_file(root, &frame.metadata)?;
 
         let metadata_path = root.join(&frame.metadata);
@@ -1620,6 +2082,34 @@ pub fn validate_dataset(
                 });
             }
         }
+        if lidar_enabled {
+            let lidar = metadata
+                .get("lidar")
+                .ok_or_else(|| ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "missing lidar section".to_string(),
+                })?;
+            if !lidar
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                return Err(ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "lidar.enabled is not true".to_string(),
+                });
+            }
+            let object_id_convention = lidar
+                .get("convention")
+                .and_then(|value| value.get("miss_object_id"))
+                .and_then(|value| value.as_u64());
+            if object_id_convention != Some(0) {
+                return Err(ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "lidar convention must use object ID 0 for misses".to_string(),
+                });
+            }
+        }
     }
 
     Ok(ValidationReport {
@@ -1635,6 +2125,19 @@ fn check_optional_file(
         check_file(root, path)?;
     }
     Ok(())
+}
+
+fn check_required_optional_file(
+    root: &Path,
+    path: Option<&str>,
+    label: &str,
+) -> std::result::Result<(), ValidationError> {
+    let path = path.ok_or_else(|| {
+        ValidationError::InvalidManifest(format!(
+            "LiDAR is enabled, but manifest frame is missing {label}"
+        ))
+    })?;
+    check_file(root, path)
 }
 
 fn check_file(root: &Path, path: &str) -> std::result::Result<(), ValidationError> {

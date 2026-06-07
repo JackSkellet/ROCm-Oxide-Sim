@@ -1,12 +1,16 @@
 use sim_core::{Camera, Entity, Material, ObjectId, PrimitiveShape, Scene, Transform, Vec3};
 use sim_datasets::{
-    CameraPathConfig, DatasetConfig, DatasetManifest, DatasetWriter, DepthImage,
-    DomainRandomizationConfig, ObjectTransformRandomization, OutputSelection, RgbImage,
-    SegmentationImage, SensorImageSet, ValidationError, camera_for_dataset_frame,
-    depth_preview_pixels, frame_output_paths, randomize_camera_for_frame,
-    randomize_scene_for_frame, segmentation_color, validate_dataset,
+    CameraPathConfig, DatasetConfig, DatasetLidarConfig, DatasetManifest, DatasetWriter,
+    DepthImage, DomainRandomizationConfig, LidarFrameMetadata, ObjectTransformRandomization,
+    OutputSelection, RgbImage, SegmentationImage, SensorImageSet, ValidationError,
+    camera_for_dataset_frame, depth_preview_pixels, frame_output_paths,
+    frame_output_paths_for_config, frame_output_paths_for_selection_and_lidar,
+    lidar_range_preview_pixels, randomize_camera_for_frame, randomize_scene_for_frame,
+    segmentation_color, validate_dataset,
 };
-use sim_sensors::{DepthMetadata, FrameMetadata, FrameOutputMetadata, ObjectIdMetadata};
+use sim_sensors::{
+    DepthMetadata, FrameMetadata, FrameOutputMetadata, LidarFrame, ObjectIdMetadata,
+};
 
 #[test]
 fn dataset_writer_writes_all_sensor_outputs_and_manifest() {
@@ -98,6 +102,28 @@ fn frame_output_paths_use_six_digit_relative_names() {
 }
 
 #[test]
+fn frame_output_paths_include_lidar_when_enabled() {
+    let paths = frame_output_paths_for_selection_and_lidar(7, OutputSelection::all(), true);
+
+    assert_eq!(
+        paths.lidar_range.as_deref(),
+        Some("lidar_range/frame_000007.f32")
+    );
+    assert_eq!(
+        paths.lidar_points.as_deref(),
+        Some("lidar_points/frame_000007.xyz")
+    );
+    assert_eq!(
+        paths.lidar_object_ids.as_deref(),
+        Some("lidar_object_ids/frame_000007.u32")
+    );
+    assert_eq!(
+        paths.lidar_preview.as_deref(),
+        Some("lidar_preview/frame_000007.pgm")
+    );
+}
+
+#[test]
 fn dataset_config_parses_camera_path_and_output_selection() {
     let json = r#"{
       "scene_path": "examples/scenes/basic_scene.json",
@@ -132,6 +158,29 @@ fn dataset_config_parses_camera_path_and_output_selection() {
     assert!(matches!(config.camera_path, CameraPathConfig::Line { .. }));
     assert!(config.outputs.depth);
     assert!(!config.outputs.depth_preview);
+}
+
+#[test]
+fn dataset_config_parses_lidar_settings() {
+    let json = r#"{
+      "frame_count": 2,
+      "lidar": {
+        "enabled": true,
+        "horizontal_samples": 64,
+        "vertical_channels": 8,
+        "horizontal_fov_degrees": 180.0,
+        "vertical_fov_degrees": 20.0,
+        "min_range_m": 0.2,
+        "max_range_m": 25.0
+      }
+    }"#;
+
+    let config: DatasetConfig = serde_json::from_str(json).unwrap();
+
+    assert!(config.lidar.enabled);
+    assert_eq!(config.lidar.horizontal_samples, 64);
+    assert_eq!(config.lidar.vertical_channels, 8);
+    assert_eq!(config.lidar.to_lidar_config().sample_count(), 512);
 }
 
 #[test]
@@ -204,6 +253,41 @@ fn manifest_contains_reproducibility_and_output_contracts() {
 }
 
 #[test]
+fn manifest_includes_lidar_config_when_enabled() {
+    let lidar = DatasetLidarConfig {
+        enabled: true,
+        horizontal_samples: 8,
+        vertical_channels: 2,
+        ..DatasetLidarConfig::default()
+    };
+    let config = DatasetConfig {
+        lidar,
+        ..DatasetConfig::default()
+    };
+    let manifest = DatasetManifest::new(
+        1,
+        640,
+        360,
+        123,
+        CameraPathConfig::static_default(),
+        OutputSelection::all(),
+    )
+    .with_lidar(lidar)
+    .with_object_ids(vec![ObjectIdMetadata::new(0, "background")])
+    .with_frames(vec![
+        frame_output_paths_for_config(1, &config).to_manifest_frame(1),
+    ]);
+
+    assert!(manifest.lidar.enabled);
+    assert_eq!(manifest.lidar.horizontal_samples, 8);
+    assert!(manifest.lidar_convention.is_some());
+    assert_eq!(
+        manifest.frames[0].lidar_range.as_deref(),
+        Some("lidar_range/frame_000001.f32")
+    );
+}
+
+#[test]
 fn manifest_preserves_box_object_metadata() {
     let manifest = DatasetManifest::new(
         1,
@@ -266,6 +350,110 @@ fn validation_reports_missing_expected_files() {
 
     assert!(matches!(err, ValidationError::MissingFile(_)));
     assert!(err.to_string().contains("rgb/frame_000001.ppm"));
+}
+
+#[test]
+fn lidar_writer_outputs_files_and_validation_checks_them() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = DatasetConfig {
+        frame_count: 1,
+        width: 2,
+        height: 1,
+        lidar: DatasetLidarConfig {
+            enabled: true,
+            horizontal_samples: 2,
+            vertical_channels: 1,
+            ..DatasetLidarConfig::default()
+        },
+        ..DatasetConfig::default()
+    };
+    let mut writer = DatasetWriter::new_with_config(
+        temp_dir.path(),
+        config.clone(),
+        None,
+        None,
+        "cpu-preview".to_string(),
+        vec![ObjectIdMetadata::new(0, "background")],
+    )
+    .unwrap();
+    let camera = Camera::default_rgb().with_resolution(2, 1);
+    let paths = frame_output_paths_for_config(1, &config);
+    let metadata = sim_datasets::DatasetFrameMetadata::new(
+        1,
+        0.0,
+        "rgb-main",
+        123,
+        &config.camera_path,
+        &camera,
+        &paths,
+        None,
+        vec![ObjectIdMetadata::new(0, "background")],
+        Some("cpu-preview".to_string()),
+    )
+    .with_lidar(LidarFrameMetadata::new(config.lidar, &paths));
+    let images = SensorImageSet {
+        rgb: RgbImage::new(2, 1, vec![0, 0]).unwrap(),
+        depth: DepthImage::new(2, 1, vec![0.0, 1.0]).unwrap(),
+        segmentation: SegmentationImage::new(2, 1, vec![0, 1]).unwrap(),
+    };
+    let lidar = LidarFrame::new(
+        2,
+        1,
+        FrameMetadata::new(1, 0.0, "lidar-main"),
+        vec![0.0, 3.5],
+        vec![Vec3::ZERO, Vec3::new(0.0, 0.0, -3.5)],
+        vec![0, 5],
+    );
+
+    writer
+        .write_dataset_outputs(1, &images, Some(&lidar), &metadata)
+        .unwrap();
+    writer.finish().unwrap();
+
+    assert!(
+        temp_dir
+            .path()
+            .join("lidar_range/frame_000001.f32")
+            .exists()
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join("lidar_points/frame_000001.xyz")
+            .exists()
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join("lidar_object_ids/frame_000001.u32")
+            .exists()
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join("lidar_preview/frame_000001.pgm")
+            .exists()
+    );
+    assert_eq!(validate_dataset(temp_dir.path()).unwrap().frame_count, 1);
+
+    std::fs::remove_file(temp_dir.path().join("lidar_range/frame_000001.f32")).unwrap();
+    let err = validate_dataset(temp_dir.path()).unwrap_err();
+    assert!(matches!(err, ValidationError::MissingFile(_)));
+    assert!(err.to_string().contains("lidar_range/frame_000001.f32"));
+}
+
+#[test]
+fn lidar_preview_maps_misses_to_black_and_normalizes_returns() {
+    let frame = LidarFrame::new(
+        4,
+        1,
+        FrameMetadata::new(1, 0.0, "lidar-main"),
+        vec![0.0, 1.0, 3.0, f32::INFINITY],
+        vec![Vec3::ZERO; 4],
+        vec![0, 1, 2, 0],
+    );
+
+    assert_eq!(lidar_range_preview_pixels(&frame), vec![0, 255, 32, 0]);
 }
 
 #[test]
@@ -345,6 +533,23 @@ fn randomized_boxes_config_parses() {
     assert!(config.domain_randomization.object_transforms.enabled);
     assert!(config.domain_randomization.materials.enabled);
     assert!(config.domain_randomization.camera.enabled);
+}
+
+#[test]
+fn randomized_boxes_lidar_config_parses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/datasets/randomized_boxes_lidar.json");
+    let config: DatasetConfig = serde_json::from_str(&std::fs::read_to_string(path).unwrap())
+        .expect("randomized_boxes_lidar config should parse");
+
+    assert_eq!(
+        config.scene_path.as_deref(),
+        Some(std::path::Path::new("examples/scenes/boxes_scene.json"))
+    );
+    assert!(config.domain_randomization.enabled);
+    assert!(config.lidar.enabled);
+    assert_eq!(config.lidar.horizontal_samples, 512);
+    assert_eq!(config.lidar.vertical_channels, 32);
 }
 
 #[test]

@@ -15,21 +15,22 @@ CPU-only foundational data types: `Vec3`, `EulerRotation`, `Transform`,
 `sim-sensors`
 
 Sensor interfaces and frame contracts: `Sensor`, RGB/depth/segmentation sensor
-types, `SensorFrame<T>`, `CameraIntrinsics`, `SensorPose`, and
-`FrameMetadata`. This crate depends on `sim-core` only.
+types, LiDAR config/frame types, `SensorFrame<T>`, `CameraIntrinsics`,
+`SensorPose`, and `FrameMetadata`. This crate depends on `sim-core` only.
 
 `sim-render-rocm`
 
 The optional AMD GPU backend. It depends on ROCm-Oxide behind the `rocm` feature
-and currently renders deterministic RGB, linear depth, and segmentation buffers
-with one HIPRTC pass. It uploads supported `sim-core::Scene` primitives into GPU
-buffers before rendering. It owns ROCm-Oxide device/module/kernel/buffer
-interactions but does not duplicate ROCm-Oxide runtime internals.
+and currently renders deterministic RGB, linear depth, segmentation, and
+single-return LiDAR/raycast buffers. It uploads supported `sim-core::Scene`
+primitives into GPU buffers before rendering. It owns ROCm-Oxide
+device/module/kernel/buffer interactions but does not duplicate ROCm-Oxide
+runtime internals.
 
 `sim-datasets`
 
-Dataset export helpers. The initial layout writes RGB PPM files, per-frame JSON
-metadata, and `dataset_manifest.json`.
+Dataset export helpers. The layout writes RGB/depth/segmentation/LiDAR files,
+previews, per-frame JSON metadata, and `dataset_manifest.json`.
 
 `sim-physics`
 
@@ -38,9 +39,8 @@ backend without adding a heavy physics engine yet.
 
 Apps
 
-`sensor_lab` runs one sensor capture, `dataset_generator` writes a short
-multi-frame dataset, and `sim_viewer` displays live RGB/depth/segmentation
-previews.
+`sensor_lab` runs one sensor capture, `dataset_generator` writes a multi-frame
+dataset, and `sim_viewer` displays live RGB/depth/segmentation previews.
 
 ## Data Flow
 
@@ -53,15 +53,17 @@ Current milestone detail:
 1. `sim-core` builds a CPU `Scene` and `Camera`.
 2. `sim-sensors` wraps the camera as an RGB sensor and creates frame metadata.
 3. `sim-render-rocm`, when built with `--features rocm`, converts supported
-   scene primitives to GPU ABI structs and uploads sphere, plane, and material
-   buffers with ROCm-Oxide `DeviceBuffer`.
+   scene primitives to GPU ABI structs and uploads sphere, plane, box, and
+   material buffers with ROCm-Oxide `DeviceBuffer`.
 4. The renderer opens ROCm-Oxide, compiles a deterministic HIPRTC kernel,
    launches linear primitive intersection over the uploaded buffers, and returns
    `DeviceBuffer<u32>` RGB, `DeviceBuffer<f32>` depth, and `DeviceBuffer<u32>`
    segmentation outputs.
-5. Apps copy the buffers to host through renderer helpers.
-6. `sim-datasets` writes PPM/PGM previews, raw depth/segmentation files, and
-   JSON metadata/manifest outputs.
+5. The LiDAR renderer launches a separate ray-grid kernel over the same
+   uploaded scene buffers and returns range, point, and object ID buffers.
+6. Apps copy the buffers to host through renderer helpers.
+7. `sim-datasets` writes PPM/PGM previews, raw depth/segmentation/LiDAR files,
+   and JSON metadata/manifest outputs.
 7. `sim_viewer` uses the same host-copy output path and uploads the selected
    preview mode through `winit + pixels`.
 
@@ -71,17 +73,19 @@ use deterministic CPU preview images only for smoke-testable CLI output.
 ## Current Renderer Scope
 
 The ROCm renderer now uses uploaded `sim-core::Scene` data for the supported
-Milestone 3 primitive subset:
+primitive subset:
 
 - Sphere.
 - Plane.
-- One simple material record per entity, using base color for direct lighting.
+- World-space axis-aligned box.
+- One simple material record per entity, using base color and simple material
+  kind for preview shading.
 - Stable nonzero `ObjectId` values for segmentation.
 
 The default deterministic scene is now just a `sim-core::Scene` fixture that
-goes through the same upload path. Boxes are currently rejected with a clear
-unsupported-primitive error. Meshes, BVH acceleration, material systems, OpenUSD,
-URDF, physics synchronization, and dynamic GPU scene mutation are deferred.
+goes through the same upload path. Box rotation is ignored for now. Meshes, BVH
+acceleration, richer material systems, OpenUSD, URDF, physics synchronization,
+robot-relative sensor rigs, and dynamic GPU scene mutation are deferred.
 
 The viewer is also intentionally not a direct HIP/Vulkan interop path yet. It
 copies selected ROCm outputs to host memory, converts them to an RGBA preview,

@@ -16,6 +16,15 @@ cargo run -p dataset_generator --features rocm -- \
   validate --dataset target/randomized_boxes
 ```
 
+The LiDAR variant uses the same randomized scene controls plus LiDAR outputs:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --config examples/datasets/randomized_boxes_lidar.json \
+  --out target/lidar_dataset \
+  --overwrite
+```
+
 Two runs with the same config and seed should be byte-identical:
 
 ```bash

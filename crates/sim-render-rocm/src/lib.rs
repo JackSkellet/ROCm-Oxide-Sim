@@ -6,7 +6,10 @@
 //! tracer and does not build acceleration structures yet.
 
 use sim_core::{PrimitiveShape, Scene, Vec3};
-use sim_sensors::{DepthFrame, FrameMetadata, RgbCameraSensor, RgbFrame, SegmentationFrame};
+use sim_sensors::{
+    DepthFrame, FrameMetadata, LidarConfig, LidarFrame, RgbCameraSensor, RgbFrame,
+    SegmentationFrame,
+};
 use thiserror::Error;
 
 /// GPU ABI vector with 16-byte stride.
@@ -102,6 +105,8 @@ unsafe impl rocm_oxide::DevicePod for GpuMaterial {}
 unsafe impl rocm_oxide::DevicePod for CameraParams {}
 #[cfg(feature = "rocm")]
 unsafe impl rocm_oxide::DevicePod for RenderParams {}
+#[cfg(feature = "rocm")]
+unsafe impl rocm_oxide::DevicePod for LidarParams {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostSceneBuffers {
@@ -216,6 +221,28 @@ struct RenderParams {
 }
 
 #[cfg(feature = "rocm")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct LidarParams {
+    origin: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
+    forward: [f32; 4],
+    horizontal_samples: u32,
+    vertical_channels: u32,
+    sphere_count: u32,
+    plane_count: u32,
+    box_count: u32,
+    material_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    horizontal_fov_radians: f32,
+    vertical_fov_radians: f32,
+    min_range_m: f32,
+    max_range_m: f32,
+}
+
+#[cfg(feature = "rocm")]
 impl CameraParams {
     fn from_sensor(sensor: &RgbCameraSensor) -> Self {
         let camera = sensor.camera();
@@ -230,6 +257,35 @@ impl CameraParams {
             tan_half_fov_y: (camera.vertical_fov_degrees.to_radians() * 0.5).tan(),
             aspect: camera.aspect_ratio,
             _padding: [0.0, 0.0],
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
+impl LidarParams {
+    fn from_config(config: LidarConfig, scene: &RocmScene) -> Self {
+        let config = config.normalized();
+        let translation = config.pose.translation;
+        let right = config.pose.transform_direction(Vec3::X);
+        let up = config.pose.transform_direction(Vec3::Y);
+        let forward = config.pose.transform_direction(Vec3::new(0.0, 0.0, -1.0));
+        Self {
+            origin: [translation.x, translation.y, translation.z, 0.0],
+            right: [right.x, right.y, right.z, 0.0],
+            up: [up.x, up.y, up.z, 0.0],
+            forward: [forward.x, forward.y, forward.z, 0.0],
+            horizontal_samples: config.horizontal_samples,
+            vertical_channels: config.vertical_channels,
+            sphere_count: scene.sphere_count,
+            plane_count: scene.plane_count,
+            box_count: scene.box_count,
+            material_count: scene.material_count,
+            _pad0: 0,
+            _pad1: 0,
+            horizontal_fov_radians: config.horizontal_fov_degrees.to_radians(),
+            vertical_fov_radians: config.vertical_fov_degrees.to_radians(),
+            min_range_m: config.min_range_m,
+            max_range_m: config.max_range_m,
         }
     }
 }
@@ -338,6 +394,25 @@ struct RenderParams {
     unsigned int material_count;
     unsigned int _pad0;
     unsigned int _pad1;
+};
+
+struct LidarParams {
+    float4 origin;
+    float4 right;
+    float4 up;
+    float4 forward;
+    unsigned int horizontal_samples;
+    unsigned int vertical_channels;
+    unsigned int sphere_count;
+    unsigned int plane_count;
+    unsigned int box_count;
+    unsigned int material_count;
+    unsigned int _pad0;
+    unsigned int _pad1;
+    float horizontal_fov_radians;
+    float vertical_fov_radians;
+    float min_range_m;
+    float max_range_m;
 };
 
 __device__ V3 from_float4(float4 value) {
@@ -663,6 +738,105 @@ void render_sensor_outputs(
     depth[i] = hit ? best_t : 0.0f;
     segmentation[i] = best_object_id;
 }
+
+extern "C" __global__
+void render_lidar_outputs(
+    float* ranges_m,
+    GpuVec3* points_xyz,
+    unsigned int* object_ids,
+    const GpuSphere* spheres,
+    const GpuPlane* planes,
+    const GpuBox* boxes,
+    const GpuMaterial* materials,
+    LidarParams params
+) {
+    unsigned long i = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int horizontal_samples = params.horizontal_samples;
+    unsigned int vertical_channels = params.vertical_channels;
+    unsigned long ray_count = (unsigned long)horizontal_samples * (unsigned long)vertical_channels;
+    if (i >= ray_count) {
+        return;
+    }
+
+    unsigned int x = (unsigned int)(i % horizontal_samples);
+    unsigned int y = (unsigned int)(i / horizontal_samples);
+    float h_t = horizontal_samples <= 1u ? 0.5f : (float)x / (float)(horizontal_samples - 1u);
+    float v_t = vertical_channels <= 1u ? 0.5f : (float)y / (float)(vertical_channels - 1u);
+    float yaw = (h_t - 0.5f) * params.horizontal_fov_radians;
+    float pitch = (v_t - 0.5f) * params.vertical_fov_radians;
+    float sin_yaw = sinf(yaw);
+    float cos_yaw = cosf(yaw);
+    float sin_pitch = sinf(pitch);
+    float cos_pitch = cosf(pitch);
+
+    V3 ray_origin = from_float4(params.origin);
+    V3 ray_dir = norm(add(
+        add(
+            mul(from_float4(params.forward), cos_pitch * cos_yaw),
+            mul(from_float4(params.right), cos_pitch * sin_yaw)
+        ),
+        mul(from_float4(params.up), sin_pitch)
+    ));
+
+    float best_t = params.max_range_m;
+    unsigned int best_object_id = 0u;
+    int hit = 0;
+
+    for (unsigned int sphere = 0; sphere < params.sphere_count; ++sphere) {
+        GpuSphere primitive = spheres[sphere];
+        float t = hit_sphere(ray_origin, ray_dir, from_gpu_vec3(primitive.center), primitive.radius);
+        if (t >= params.min_range_m && t <= best_t) {
+            best_t = t;
+            best_object_id = primitive.object_id;
+            hit = 1;
+        }
+    }
+
+    for (unsigned int plane = 0; plane < params.plane_count; ++plane) {
+        GpuPlane primitive = planes[plane];
+        float t = hit_plane(
+            ray_origin,
+            ray_dir,
+            from_gpu_vec3(primitive.point),
+            norm(from_gpu_vec3(primitive.normal))
+        );
+        if (t >= params.min_range_m && t <= best_t) {
+            best_t = t;
+            best_object_id = primitive.object_id;
+            hit = 1;
+        }
+    }
+
+    for (unsigned int box = 0; box < params.box_count; ++box) {
+        GpuBox primitive = boxes[box];
+        V3 box_normal = v3(0.0f, 1.0f, 0.0f);
+        float t = hit_box(
+            ray_origin,
+            ray_dir,
+            from_gpu_vec3(primitive.center),
+            from_gpu_vec3(primitive.half_extents),
+            &box_normal
+        );
+        if (t >= params.min_range_m && t <= best_t) {
+            best_t = t;
+            best_object_id = primitive.object_id;
+            hit = 1;
+        }
+    }
+
+    if (hit) {
+        V3 point = add(ray_origin, mul(ray_dir, best_t));
+        ranges_m[i] = best_t;
+        points_xyz[i] = {point.x, point.y, point.z, 0.0f};
+        object_ids[i] = best_object_id;
+    } else {
+        ranges_m[i] = 0.0f;
+        points_xyz[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+        object_ids[i] = 0u;
+    }
+    (void)materials;
+    (void)params.material_count;
+}
 "#;
 
 #[derive(Debug, Error)]
@@ -805,6 +979,23 @@ pub struct HostSensorOutput {
     pub segmentation: SegmentationFrame,
 }
 
+#[cfg(feature = "rocm")]
+pub struct RocmLidarOutput {
+    pub width: u32,
+    pub height: u32,
+    pub metadata: FrameMetadata,
+    pub ranges_m: rocm_oxide::DeviceBuffer<f32>,
+    pub points_xyz: rocm_oxide::DeviceBuffer<GpuVec3>,
+    pub object_ids: rocm_oxide::DeviceBuffer<u32>,
+}
+
+#[cfg(not(feature = "rocm"))]
+pub struct RocmLidarOutput {
+    pub width: u32,
+    pub height: u32,
+    pub metadata: FrameMetadata,
+}
+
 #[cfg(not(feature = "rocm"))]
 pub struct RocmRgbFrame {
     width: u32,
@@ -836,6 +1027,7 @@ pub struct RocmSensorRenderer {
     device: rocm_oxide::Device,
     _module: rocm_oxide::Module,
     kernel: rocm_oxide::Kernel,
+    lidar_kernel: rocm_oxide::Kernel,
 }
 
 #[cfg(not(feature = "rocm"))]
@@ -862,10 +1054,18 @@ impl RocmSensorRenderer {
                     context: "loading the render_sensor_outputs kernel".to_string(),
                     message: err.to_string(),
                 })?;
+        let lidar_kernel =
+            module
+                .kernel(c"render_lidar_outputs")
+                .map_err(|err| RocmRenderError::RocmOxide {
+                    context: "loading the render_lidar_outputs kernel".to_string(),
+                    message: err.to_string(),
+                })?;
         Ok(Self {
             device,
             _module: module,
             kernel,
+            lidar_kernel,
         })
     }
 
@@ -1062,6 +1262,18 @@ impl RocmSensorRenderer {
     }
 
     #[cfg(not(feature = "rocm"))]
+    pub fn render_uploaded_scene_to_device(
+        &self,
+        _scene: &RocmScene,
+        sensor: &RgbCameraSensor,
+        metadata: FrameMetadata,
+    ) -> Result<RocmSensorOutput> {
+        let camera = RocmRgbCamera::from_sensor(sensor);
+        let _ = (camera, metadata);
+        Err(RocmRenderError::BackendUnavailable)
+    }
+
+    #[cfg(not(feature = "rocm"))]
     pub fn render_all_to_device(
         &self,
         _scene: &Scene,
@@ -1070,6 +1282,109 @@ impl RocmSensorRenderer {
     ) -> Result<RocmSensorOutput> {
         let camera = RocmRgbCamera::from_sensor(sensor);
         let _ = (camera, metadata);
+        Err(RocmRenderError::BackendUnavailable)
+    }
+
+    #[cfg(feature = "rocm")]
+    pub fn render_lidar_to_device(
+        &self,
+        scene: &Scene,
+        config: LidarConfig,
+        metadata: FrameMetadata,
+    ) -> Result<RocmLidarOutput> {
+        let uploaded = self.upload_scene(scene)?;
+        self.render_lidar_uploaded_scene_to_device(&uploaded, config, metadata)
+    }
+
+    #[cfg(not(feature = "rocm"))]
+    pub fn render_lidar_to_device(
+        &self,
+        _scene: &Scene,
+        config: LidarConfig,
+        metadata: FrameMetadata,
+    ) -> Result<RocmLidarOutput> {
+        let config = config.normalized();
+        let _ = (config, metadata);
+        Err(RocmRenderError::BackendUnavailable)
+    }
+
+    #[cfg(feature = "rocm")]
+    pub fn render_lidar_uploaded_scene_to_device(
+        &self,
+        scene: &RocmScene,
+        config: LidarConfig,
+        metadata: FrameMetadata,
+    ) -> Result<RocmLidarOutput> {
+        let config = config.normalized();
+        let ray_count = config.sample_count();
+        if ray_count == 0 {
+            return Err(RocmRenderError::InvalidTarget(format!(
+                "{}x{} LiDAR scan",
+                config.horizontal_samples, config.vertical_channels
+            )));
+        }
+        let ranges_m = rocm_oxide::DeviceBuffer::<f32>::new(ray_count).map_err(|err| {
+            RocmRenderError::RocmOxide {
+                context: format!("allocating LiDAR range buffer for {} rays", ray_count),
+                message: err.to_string(),
+            }
+        })?;
+        let points_xyz = rocm_oxide::DeviceBuffer::<GpuVec3>::new(ray_count).map_err(|err| {
+            RocmRenderError::RocmOxide {
+                context: format!("allocating LiDAR point buffer for {} rays", ray_count),
+                message: err.to_string(),
+            }
+        })?;
+        let object_ids = rocm_oxide::DeviceBuffer::<u32>::new(ray_count).map_err(|err| {
+            RocmRenderError::RocmOxide {
+                context: format!("allocating LiDAR object ID buffer for {} rays", ray_count),
+                message: err.to_string(),
+            }
+        })?;
+        let params = LidarParams::from_config(config, scene);
+
+        unsafe {
+            rocm_oxide::launch_1d!(
+                self.lidar_kernel,
+                ray_count,
+                ranges_m.as_mut_ptr(),
+                points_xyz.as_mut_ptr(),
+                object_ids.as_mut_ptr(),
+                scene.spheres.as_ptr(),
+                scene.planes.as_ptr(),
+                scene.boxes.as_ptr(),
+                scene.materials.as_ptr(),
+                params,
+            )
+            .map_err(|err| RocmRenderError::RocmOxide {
+                context: "launching render_lidar_outputs".to_string(),
+                message: err.to_string(),
+            })?;
+        }
+        rocm_oxide::hip::synchronize().map_err(|err| RocmRenderError::RocmOxide {
+            context: "synchronizing the LiDAR render".to_string(),
+            message: err.to_string(),
+        })?;
+
+        Ok(RocmLidarOutput {
+            width: config.horizontal_samples,
+            height: config.vertical_channels,
+            metadata,
+            ranges_m,
+            points_xyz,
+            object_ids,
+        })
+    }
+
+    #[cfg(not(feature = "rocm"))]
+    pub fn render_lidar_uploaded_scene_to_device(
+        &self,
+        _scene: &RocmScene,
+        config: LidarConfig,
+        metadata: FrameMetadata,
+    ) -> Result<RocmLidarOutput> {
+        let config = config.normalized();
+        let _ = (config, metadata);
         Err(RocmRenderError::BackendUnavailable)
     }
 
@@ -1177,6 +1492,50 @@ impl RocmSensorRenderer {
         Err(RocmRenderError::BackendUnavailable)
     }
 
+    #[cfg(feature = "rocm")]
+    pub fn copy_lidar_to_host(&self, output: &RocmLidarOutput) -> Result<LidarFrame> {
+        let ranges_m = output
+            .ranges_m
+            .copy_to_vec()
+            .map_err(|err| RocmRenderError::RocmOxide {
+                context: "copying LiDAR range device buffer to host".to_string(),
+                message: err.to_string(),
+            })?;
+        let points_gpu =
+            output
+                .points_xyz
+                .copy_to_vec()
+                .map_err(|err| RocmRenderError::RocmOxide {
+                    context: "copying LiDAR point device buffer to host".to_string(),
+                    message: err.to_string(),
+                })?;
+        let object_ids =
+            output
+                .object_ids
+                .copy_to_vec()
+                .map_err(|err| RocmRenderError::RocmOxide {
+                    context: "copying LiDAR object ID device buffer to host".to_string(),
+                    message: err.to_string(),
+                })?;
+        let points_xyz = points_gpu
+            .into_iter()
+            .map(|point| Vec3::new(point.x, point.y, point.z))
+            .collect();
+        Ok(LidarFrame::new(
+            output.width,
+            output.height,
+            output.metadata.clone(),
+            ranges_m,
+            points_xyz,
+            object_ids,
+        ))
+    }
+
+    #[cfg(not(feature = "rocm"))]
+    pub fn copy_lidar_to_host(&self, _output: &RocmLidarOutput) -> Result<LidarFrame> {
+        Err(RocmRenderError::BackendUnavailable)
+    }
+
     pub fn render_rgb_host(
         &self,
         scene: &Scene,
@@ -1195,6 +1554,16 @@ impl RocmSensorRenderer {
     ) -> Result<HostSensorOutput> {
         let device_output = self.render_all_to_device(scene, sensor, metadata)?;
         self.copy_all_to_host(&device_output)
+    }
+
+    pub fn render_lidar_host(
+        &self,
+        scene: &Scene,
+        config: LidarConfig,
+        metadata: FrameMetadata,
+    ) -> Result<LidarFrame> {
+        let device_output = self.render_lidar_to_device(scene, config, metadata)?;
+        self.copy_lidar_to_host(&device_output)
     }
 }
 
@@ -1303,6 +1672,13 @@ mod tests {
         assert_eq!(align_of::<GpuMaterial>(), 4);
     }
 
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn lidar_params_layout_is_plain_c_abi() {
+        assert_eq!(size_of::<LidarParams>(), 96);
+        assert_eq!(align_of::<LidarParams>(), 4);
+    }
+
     #[cfg(not(feature = "rocm"))]
     #[test]
     fn renderer_reports_unavailable_without_rocm_feature() {
@@ -1393,5 +1769,48 @@ mod tests {
                 .iter()
                 .any(|&object_id| object_id == 6)
         );
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires ROCm, HIPRTC, and a visible AMD GPU"]
+    fn uploads_and_renders_lidar_box_scene_with_rocm_backend() {
+        let mut scene = sim_core::Scene::new();
+        scene.add_entity(Entity::new(
+            "ground",
+            PrimitiveShape::plane(Vec3::Y, 0.0),
+            Transform::default(),
+            Material::matte(Vec3::new(0.55, 0.56, 0.52)),
+            ObjectId::new(1),
+        ));
+        scene.add_entity(Entity::new(
+            "red box",
+            PrimitiveShape::box_with_half_extents(Vec3::new(0.45, 0.45, 0.45)),
+            Transform::from_translation(Vec3::new(0.0, 0.45, -1.4)),
+            Material::matte(Vec3::new(0.85, 0.1, 0.08)),
+            ObjectId::new(6),
+        ));
+        let config = LidarConfig {
+            horizontal_samples: 64,
+            vertical_channels: 8,
+            max_range_m: 20.0,
+            ..LidarConfig::default()
+        };
+        let metadata = FrameMetadata::new(1, 0.0, "lidar-main");
+        let renderer = RocmSensorRenderer::new().expect("ROCm renderer should initialize");
+        let uploaded = renderer
+            .upload_scene(&scene)
+            .expect("scene upload should complete");
+
+        let frame = renderer
+            .render_lidar_uploaded_scene_to_device(&uploaded, config, metadata)
+            .and_then(|output| renderer.copy_lidar_to_host(&output))
+            .expect("ROCm LiDAR render should complete");
+
+        assert_eq!(frame.width, 64);
+        assert_eq!(frame.height, 8);
+        assert_eq!(frame.ranges_m.len(), 64 * 8);
+        assert!(frame.ranges_m.iter().any(|&range| range > 0.0));
+        assert!(frame.object_ids.iter().any(|&object_id| object_id > 0));
     }
 }

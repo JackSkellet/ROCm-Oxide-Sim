@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added Milestone 6A LiDAR/raycast sensor contracts with deterministic
+  spherical scan configuration.
+- Added ROCm LiDAR raycast rendering over uploaded sphere, plane, and AABB box
+  scene buffers.
+- Added LiDAR dataset outputs for range `.f32`, XYZ point `.xyz`, object ID
+  `.u32`, and normalized range preview `.pgm` files.
+- Added LiDAR metadata, manifest conventions, validation checks, and
+  `examples/datasets/randomized_boxes_lidar.json`.
+- Added `sensor_lab --lidar` for one-frame LiDAR smoke output.
 - Added Milestone 5B deterministic domain randomization for dataset generation.
 - Added randomized object position/scale, material color/kind, emissive
   intensity, and camera pose/FOV controls.

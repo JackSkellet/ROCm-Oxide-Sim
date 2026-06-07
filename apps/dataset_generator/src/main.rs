@@ -1,15 +1,15 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use sim_core::Scene;
 use sim_datasets::{
-    CameraPathConfig, DatasetConfig, DatasetFrameMetadata, DatasetWriter, SensorImageSet,
-    camera_for_dataset_frame, frame_output_paths_for_selection, randomize_camera_for_frame,
-    randomize_scene_for_frame, validate_dataset,
+    CameraPathConfig, DatasetConfig, DatasetFrameMetadata, DatasetWriter, LidarFrameMetadata,
+    SensorImageSet, camera_for_dataset_frame, frame_output_paths_for_config,
+    randomize_camera_for_frame, randomize_scene_for_frame, validate_dataset,
 };
 #[cfg(feature = "rocm")]
 use sim_render_rocm::RocmSensorRenderer;
 #[cfg(feature = "rocm")]
 use sim_sensors::FrameMetadata;
-use sim_sensors::{RgbCameraSensor, scene_object_ids};
+use sim_sensors::{LidarFrame, RgbCameraSensor, scene_object_ids};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -196,13 +196,17 @@ fn print_dry_run(config: &DatasetConfig) -> Result<(), Box<dyn Error>> {
     println!("{}", serde_json::to_string_pretty(config)?);
     println!("dataset_generator: planned output files");
     for frame_index in 1..=config.frame_count {
-        let paths = frame_output_paths_for_selection(frame_index as u64, config.outputs);
+        let paths = frame_output_paths_for_config(frame_index as u64, config);
         for path in [
             paths.rgb.as_deref(),
             paths.depth.as_deref(),
             paths.depth_preview.as_deref(),
             paths.segmentation.as_deref(),
             paths.segmentation_preview.as_deref(),
+            paths.lidar_range.as_deref(),
+            paths.lidar_points.as_deref(),
+            paths.lidar_object_ids.as_deref(),
+            paths.lidar_preview.as_deref(),
             Some(paths.metadata.as_str()),
         ]
         .into_iter()
@@ -264,7 +268,7 @@ fn render_dataset(
             base_scene
         };
         let sensor = RgbCameraSensor::new("rgb-main", camera);
-        let paths = frame_output_paths_for_selection(frame_index as u64, config.outputs);
+        let paths = frame_output_paths_for_config(frame_index as u64, config);
         let mut metadata = DatasetFrameMetadata::new(
             frame_index as u64,
             timestamp_seconds,
@@ -277,12 +281,25 @@ fn render_dataset(
             object_ids.to_vec(),
             Some(render_session.backend_label()),
         );
+        if config.lidar.enabled {
+            metadata = metadata.with_lidar(LidarFrameMetadata::new(config.lidar, &paths));
+        }
         if config.domain_randomization.enabled {
             metadata = metadata.with_randomization(randomized.metadata);
         }
 
-        let images = render_session.render_images(render_scene, &sensor, frame_index as u64)?;
-        writer.write_sensor_outputs(frame_index as u64, &images, &metadata)?;
+        let rendered = render_session.render_frame(
+            render_scene,
+            &sensor,
+            config.lidar.enabled.then(|| config.lidar.to_lidar_config()),
+            frame_index as u64,
+        )?;
+        writer.write_dataset_outputs(
+            frame_index as u64,
+            &rendered.images,
+            rendered.lidar.as_ref(),
+            &metadata,
+        )?;
     }
 
     Ok(())
@@ -337,49 +354,74 @@ impl RenderSession {
         }
     }
 
-    fn render_images(
+    fn render_frame(
         &self,
         scene: &Scene,
         sensor: &RgbCameraSensor,
+        lidar_config: Option<sim_sensors::LidarConfig>,
         frame_index: u64,
-    ) -> Result<SensorImageSet, Box<dyn Error>> {
+    ) -> Result<RenderedFrame, Box<dyn Error>> {
         match self {
             #[cfg(feature = "rocm")]
             Self::Rocm(rocm) => {
                 let render_metadata =
                     FrameMetadata::new(frame_index, frame_index as f64 / 30.0, sensor.id());
-                let output = if let Some(uploaded_scene) = &rocm.uploaded_scene {
-                    rocm.renderer.render_uploaded_scene_to_device(
-                        uploaded_scene,
-                        sensor,
-                        render_metadata,
-                    )?
+                let lidar_metadata =
+                    FrameMetadata::new(frame_index, frame_index as f64 / 30.0, "lidar-main");
+                let owned_upload;
+                let uploaded_scene = if let Some(uploaded_scene) = &rocm.uploaded_scene {
+                    uploaded_scene
                 } else {
-                    let uploaded_scene = rocm.renderer.upload_scene(scene)?;
-                    rocm.renderer.render_uploaded_scene_to_device(
-                        &uploaded_scene,
-                        sensor,
-                        render_metadata,
-                    )?
+                    owned_upload = rocm.renderer.upload_scene(scene)?;
+                    &owned_upload
                 };
+                let output = rocm.renderer.render_uploaded_scene_to_device(
+                    uploaded_scene,
+                    sensor,
+                    render_metadata,
+                )?;
                 let host = rocm.renderer.copy_all_to_host(&output)?;
-                Ok(SensorImageSet::from_frames(
-                    host.rgb,
-                    host.depth,
-                    host.segmentation,
-                )?)
+                let images = SensorImageSet::from_frames(host.rgb, host.depth, host.segmentation)?;
+                let lidar = if let Some(lidar_config) = lidar_config {
+                    let output = rocm.renderer.render_lidar_uploaded_scene_to_device(
+                        uploaded_scene,
+                        lidar_config,
+                        lidar_metadata,
+                    )?;
+                    Some(rocm.renderer.copy_lidar_to_host(&output)?)
+                } else {
+                    None
+                };
+                Ok(RenderedFrame { images, lidar })
             }
             #[cfg(not(feature = "rocm"))]
             Self::CpuPreview => {
                 let _ = scene;
-                Ok(SensorImageSet::synthetic_preview(
+                let images = SensorImageSet::synthetic_preview(
                     sensor.intrinsics().width,
                     sensor.intrinsics().height,
                     frame_index,
-                ))
+                );
+                let lidar = lidar_config.map(|config| {
+                    sim_datasets::synthetic_lidar_frame(
+                        config,
+                        frame_index,
+                        sim_sensors::FrameMetadata::new(
+                            frame_index,
+                            frame_index as f64 / 30.0,
+                            "lidar-main",
+                        ),
+                    )
+                });
+                Ok(RenderedFrame { images, lidar })
             }
         }
     }
+}
+
+struct RenderedFrame {
+    images: SensorImageSet,
+    lidar: Option<LidarFrame>,
 }
 
 #[cfg(feature = "rocm")]

@@ -13,8 +13,9 @@ Isaac Sim replacement.
 - CPU-only scene, transform, camera, material, sensor, dataset, and placeholder
   physics types are available.
 - `sim-render-rocm` contains an opt-in ROCm-Oxide HIPRTC renderer for RGB,
-  linear depth, and segmentation outputs from uploaded `sim-core::Scene`
-  sphere, plane, and world-space axis-aligned box primitives.
+  linear depth, segmentation, and single-return LiDAR/raycast outputs from
+  uploaded `sim-core::Scene` sphere, plane, and world-space axis-aligned box
+  primitives.
 - `apps/sim_viewer` provides a live `winit + pixels` viewer for RGB, depth, and
   segmentation modes using a ROCm render -> host copy -> presentation path.
 - `examples/scenes/basic_scene.json` can be loaded by the CLIs with `--scene`.
@@ -25,16 +26,18 @@ Isaac Sim replacement.
 - `examples/datasets/randomized_boxes.json` demonstrates deterministic domain
   randomization for object transforms, materials, emissive objects, and camera
   parameters.
-- LiDAR/raycast sensors, full physics, ROS2, OpenUSD, and robot model
-  integration are planned but not implemented yet.
+- `examples/datasets/randomized_boxes_lidar.json` demonstrates deterministic
+  domain randomization plus LiDAR dataset export.
+- Full physics, ROS2, OpenUSD, and robot model integration are planned but not
+  implemented yet.
 
 ## Workspace Structure
 
 ```text
 crates/sim-core          CPU-only scene, transform, camera, material, and IDs
 crates/sim-sensors       Sensor traits, intrinsics, poses, frames, and metadata
-crates/sim-render-rocm   Optional ROCm-Oxide RGB/depth/segmentation renderer
-crates/sim-datasets      PPM RGB and metadata/manifest dataset writer
+crates/sim-render-rocm   Optional ROCm-Oxide camera and LiDAR renderer
+crates/sim-datasets      Sensor output and metadata/manifest dataset writer
 crates/sim-physics       Placeholder physics backend trait
 apps/sensor_lab          One-frame sensor rendering CLI
 apps/dataset_generator   Simple N-frame dataset generation CLI
@@ -93,6 +96,7 @@ scene to GPU primitive buffers before rendering:
 cargo run -p sensor_lab --features rocm
 cargo run -p sensor_lab --features rocm -- --scene examples/scenes/basic_scene.json
 cargo run -p sensor_lab --features rocm -- --scene examples/scenes/boxes_scene.json
+cargo run -p sensor_lab --features rocm -- --scene examples/scenes/boxes_scene.json --lidar
 ```
 
 The ROCm path writes:
@@ -106,6 +110,15 @@ target/sensor_lab/segmentation_preview.ppm
 target/sensor_lab/metadata.json
 ```
 
+With `--lidar`, it also writes:
+
+```text
+target/sensor_lab/lidar_range.f32
+target/sensor_lab/lidar_points.xyz
+target/sensor_lab/lidar_object_ids.u32
+target/sensor_lab/lidar_preview.pgm
+```
+
 Generate a small dataset:
 
 ```bash
@@ -113,8 +126,10 @@ cargo run -p dataset_generator --features rocm -- --frames 16 --out target/sim_d
 cargo run -p dataset_generator --features rocm -- --config examples/datasets/basic_orbit.json --out target/sim_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- --scene examples/scenes/boxes_scene.json --frames 4 --out target/boxes_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- --config examples/datasets/randomized_boxes.json --out target/randomized_boxes --overwrite
+cargo run -p dataset_generator --features rocm -- --config examples/datasets/randomized_boxes_lidar.json --out target/lidar_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- validate --dataset target/sim_dataset
 cargo run -p dataset_generator --features rocm -- validate --dataset target/randomized_boxes
+cargo run -p dataset_generator --features rocm -- validate --dataset target/lidar_dataset
 ```
 
 See [Dataset generation](docs/dataset_generation.md) for config files, camera
@@ -146,6 +161,7 @@ the output buffer back, the renderer returns a clear error with the failed step.
 - [Architecture](docs/architecture.md)
 - [Scene upload](docs/scene_upload.md)
 - [Sensor outputs](docs/sensor_outputs.md)
+- [LiDAR sensor](docs/lidar_sensor.md)
 - [Dataset generation](docs/dataset_generation.md)
 - [Domain randomization](docs/domain_randomization.md)
 - [Live viewer](docs/live_viewer.md)

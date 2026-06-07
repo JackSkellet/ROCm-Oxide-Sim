@@ -2,9 +2,9 @@ use sim_core::{
     Camera, Entity, Material, MaterialKind, ObjectId, PrimitiveShape, Scene, Transform, Vec3,
 };
 use sim_sensors::{
-    CameraIntrinsics, DepthFrame, DepthMetadata, FrameMetadata, FrameOutputMetadata,
-    ObjectIdMetadata, RgbCameraSensor, RgbFrame, SegmentationFrame, SensorFrame, SensorPose,
-    scene_object_ids,
+    CameraIntrinsics, DepthFrame, DepthMetadata, FrameMetadata, FrameOutputMetadata, LidarConfig,
+    LidarFrame, LidarSensor, ObjectIdMetadata, RgbCameraSensor, RgbFrame, SegmentationFrame,
+    SensorFrame, SensorPose, scene_object_ids,
 };
 
 #[test]
@@ -117,4 +117,38 @@ fn scene_object_id_metadata_includes_primitive_and_material_kind() {
     assert_eq!(red_box.label, "red box");
     assert_eq!(red_box.primitive.as_deref(), Some("box"));
     assert_eq!(red_box.material.as_deref(), Some("matte"));
+}
+
+#[test]
+fn lidar_config_defaults_match_milestone_contract() {
+    let config = LidarConfig::default();
+    let sensor = LidarSensor::new("lidar-main", config);
+
+    assert_eq!(sensor.id(), "lidar-main");
+    assert_eq!(config.horizontal_samples, 512);
+    assert_eq!(config.vertical_channels, 32);
+    assert_eq!(config.horizontal_fov_degrees, 360.0);
+    assert_eq!(config.vertical_fov_degrees, 30.0);
+    assert_eq!(config.min_range_m, 0.1);
+    assert_eq!(config.max_range_m, 50.0);
+    assert_eq!(sensor.sample_count(), 512 * 32);
+}
+
+#[test]
+fn lidar_frame_uses_zero_miss_convention() {
+    let metadata = FrameMetadata::new(1, 0.0, "lidar-main");
+    let frame = LidarFrame::new(
+        2,
+        1,
+        metadata,
+        vec![0.0, 4.5],
+        vec![Vec3::ZERO, Vec3::new(0.0, 1.0, -4.5)],
+        vec![0, 7],
+    );
+
+    assert_eq!(frame.sample_count(), 2);
+    assert_eq!(frame.miss_sample_count(), 1);
+    assert_eq!(frame.object_ids[0], 0);
+    assert_eq!(frame.ranges_m[0], 0.0);
+    assert_eq!(frame.points_xyz[0], Vec3::ZERO);
 }

@@ -15,7 +15,8 @@ Boxes are axis-aligned in world space for now. The uploaded `GpuBox` center is
 the entity transform translation and half-extents are multiplied by absolute
 transform scale. Entity rotation is ignored for boxes until oriented boxes need
 a dedicated representation. Triangle meshes, BVH acceleration, OpenUSD, URDF,
-physics bodies, LiDAR, and ROS2 integration are not part of this milestone.
+physics bodies, and ROS2 integration are still deferred. Milestone 6A reuses
+this uploaded primitive subset for single-return LiDAR raycasts.
 
 ## GPU Buffer Layout
 
@@ -107,6 +108,9 @@ compact render parameter struct. It performs simple linear intersection loops
 and writes RGB, linear ray-distance depth, and segmentation in one pass. Box
 intersection uses a slab test against a world-space AABB and returns an
 approximate face normal for shading.
+
+The LiDAR HIPRTC kernel receives the same scene buffers and performs a linear
+first-hit raycast per emitted LiDAR ray.
 
 There is no acceleration structure, mesh path, dynamic GPU mutation API, or
 zero-copy presentation path yet.

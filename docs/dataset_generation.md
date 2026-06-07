@@ -1,7 +1,9 @@
 # Dataset Generation
 
-Milestone 4 turns `apps/dataset_generator` into a reproducible synthetic dataset
-pipeline for the current RGB/depth/segmentation camera outputs.
+Milestone 4 turned `apps/dataset_generator` into a reproducible synthetic
+dataset pipeline for RGB/depth/segmentation camera outputs. Milestone 6A adds
+optional single-return LiDAR/raycast outputs that use the same uploaded
+`sim-core::Scene` geometry as the camera renderer.
 
 ## Quickstart
 
@@ -36,6 +38,15 @@ Generate a deterministic randomized dataset:
 cargo run -p dataset_generator --features rocm -- \
   --config examples/datasets/randomized_boxes.json \
   --out target/randomized_boxes \
+  --overwrite
+```
+
+Generate a deterministic randomized box dataset with LiDAR:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --config examples/datasets/randomized_boxes_lidar.json \
+  --out target/lidar_dataset \
   --overwrite
 ```
 
@@ -106,6 +117,15 @@ Config files are JSON and map to `DatasetConfig`:
     "segmentation": true,
     "segmentation_preview": true,
     "metadata": true
+  },
+  "lidar": {
+    "enabled": true,
+    "horizontal_samples": 512,
+    "vertical_channels": 32,
+    "horizontal_fov_degrees": 360.0,
+    "vertical_fov_degrees": 30.0,
+    "min_range_m": 0.1,
+    "max_range_m": 50.0
   }
 }
 ```
@@ -149,9 +169,15 @@ dataset/
   depth_preview/frame_000001.pgm
   segmentation/frame_000001.u32
   segmentation_preview/frame_000001.ppm
+  lidar_range/frame_000001.f32
+  lidar_points/frame_000001.xyz
+  lidar_object_ids/frame_000001.u32
+  lidar_preview/frame_000001.pgm
   metadata/frame_000001.json
   dataset_manifest.json
 ```
+
+The LiDAR directories are present only when `lidar.enabled` is true.
 
 ## Per-Frame Metadata
 
@@ -171,6 +197,9 @@ Each `metadata/frame_000001.json` includes:
 - Renderer backend label, such as `rocm:gfx1201` or `cpu-preview`.
 - Depth convention: linear camera ray distance in meters, `0.0` for miss.
 - Segmentation convention: `u32` object IDs, `0` background.
+- LiDAR config, pose, output paths, and convention when enabled: single-return
+  linear ray range in meters, `0.0` for miss/no return, zero XYZ point for miss,
+  and object ID `0` for miss/background.
 
 ## Manifest
 
@@ -186,6 +215,7 @@ Each `metadata/frame_000001.json` includes:
 - Domain randomization config when enabled.
 - Relative metadata path for every frame.
 - Depth and segmentation conventions.
+- LiDAR config and convention when enabled.
 - Renderer backend label.
 
 Timestamps are intentionally omitted so manifest output remains deterministic.
@@ -201,6 +231,8 @@ The validation command checks:
 - Object ID maps exist.
 - Metadata dimensions match manifest dimensions when present.
 - Randomized datasets include per-frame `domain_randomization` metadata.
+- LiDAR datasets include range, XYZ point, object ID, preview files, and
+  per-frame LiDAR metadata.
 
 ## Current Limitations
 
@@ -210,5 +242,7 @@ The validation command checks:
 - No meshes or BVH.
 - Domain randomization is deterministic but not collision-aware.
 - Per-frame domain randomization may upload a fresh scene every frame.
-- No physics, LiDAR, ROS2, OpenUSD, or URDF.
+- LiDAR is single-return raycast only; no noise model, multi-return, rolling
+  timing, motion distortion, or sensor rig abstraction yet.
+- No physics, ROS2, OpenUSD, or URDF.
 - Viewer presentation still uses ROCm -> host copy -> pixels upload.
