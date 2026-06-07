@@ -10,9 +10,9 @@ description = "Dataset export helpers for rocm-oxide-sim."
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sim-core.workspace = true
 sim-sensors.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-

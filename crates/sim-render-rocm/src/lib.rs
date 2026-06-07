@@ -1,7 +1,7 @@
 //! ROCm-Oxide sensor renderer.
 //!
 //! The first backend is intentionally narrow: an opt-in HIPRTC renderer for
-//! uploaded [`sim_core::Scene`] sphere and plane primitives. It writes RGB,
+//! uploaded [`sim_core::Scene`] sphere, plane, and axis-aligned box primitives. It writes RGB,
 //! linear ray depth, and segmentation buffers in one pass. It is not a path
 //! tracer and does not build acceleration structures yet.
 
@@ -58,7 +58,24 @@ pub struct GpuPlane {
     pub _pad1: u32,
 }
 
-/// GPU material. Only `base_color` is used by Milestone 3 shading.
+/// GPU axis-aligned box primitive.
+///
+/// Boxes are world-space AABBs for now. `center` is the entity translation and
+/// `half_extents` is the local half-extents multiplied by absolute transform
+/// scale. Entity rotation is intentionally ignored until oriented boxes need a
+/// real GPU representation.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GpuBox {
+    pub center: GpuVec3,
+    pub half_extents: GpuVec3,
+    pub material_id: u32,
+    pub object_id: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+/// GPU material used by deterministic preview shading.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GpuMaterial {
@@ -77,6 +94,8 @@ unsafe impl rocm_oxide::DevicePod for GpuSphere {}
 #[cfg(feature = "rocm")]
 unsafe impl rocm_oxide::DevicePod for GpuPlane {}
 #[cfg(feature = "rocm")]
+unsafe impl rocm_oxide::DevicePod for GpuBox {}
+#[cfg(feature = "rocm")]
 unsafe impl rocm_oxide::DevicePod for GpuMaterial {}
 
 #[cfg(feature = "rocm")]
@@ -88,6 +107,7 @@ unsafe impl rocm_oxide::DevicePod for RenderParams {}
 pub struct HostSceneBuffers {
     pub spheres: Vec<GpuSphere>,
     pub planes: Vec<GpuPlane>,
+    pub boxes: Vec<GpuBox>,
     pub materials: Vec<GpuMaterial>,
 }
 
@@ -100,6 +120,10 @@ impl HostSceneBuffers {
         self.planes.len() as u32
     }
 
+    pub fn box_count(&self) -> u32 {
+        self.boxes.len() as u32
+    }
+
     pub fn material_count(&self) -> u32 {
         self.materials.len() as u32
     }
@@ -109,9 +133,11 @@ impl HostSceneBuffers {
 pub struct RocmScene {
     spheres: rocm_oxide::DeviceBuffer<GpuSphere>,
     planes: rocm_oxide::DeviceBuffer<GpuPlane>,
+    boxes: rocm_oxide::DeviceBuffer<GpuBox>,
     materials: rocm_oxide::DeviceBuffer<GpuMaterial>,
     sphere_count: u32,
     plane_count: u32,
+    box_count: u32,
     material_count: u32,
 }
 
@@ -123,6 +149,10 @@ impl RocmScene {
 
     pub fn plane_count(&self) -> u32 {
         self.plane_count
+    }
+
+    pub fn box_count(&self) -> u32 {
+        self.box_count
     }
 
     pub fn material_count(&self) -> u32 {
@@ -134,6 +164,7 @@ impl RocmScene {
 pub struct RocmScene {
     sphere_count: u32,
     plane_count: u32,
+    box_count: u32,
     material_count: u32,
 }
 
@@ -145,6 +176,10 @@ impl RocmScene {
 
     pub fn plane_count(&self) -> u32 {
         self.plane_count
+    }
+
+    pub fn box_count(&self) -> u32 {
+        self.box_count
     }
 
     pub fn material_count(&self) -> u32 {
@@ -174,10 +209,10 @@ struct RenderParams {
     height: u32,
     sphere_count: u32,
     plane_count: u32,
+    box_count: u32,
     material_count: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 #[cfg(feature = "rocm")]
@@ -225,6 +260,15 @@ struct GpuPlane {
     unsigned int _pad1;
 };
 
+struct GpuBox {
+    GpuVec3 center;
+    GpuVec3 half_extents;
+    unsigned int material_id;
+    unsigned int object_id;
+    unsigned int _pad0;
+    unsigned int _pad1;
+};
+
 struct GpuMaterial {
     GpuVec3 base_color;
     GpuVec3 emission;
@@ -257,6 +301,10 @@ __device__ V3 mul(V3 a, float s) {
     return v3(a.x * s, a.y * s, a.z * s);
 }
 
+__device__ V3 mix3(V3 a, V3 b, float t) {
+    return add(mul(a, 1.0f - t), mul(b, t));
+}
+
 __device__ float dot3(V3 a, V3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
@@ -264,6 +312,10 @@ __device__ float dot3(V3 a, V3 b) {
 __device__ V3 norm(V3 a) {
     float len = sqrtf(fmaxf(dot3(a, a), 1.0e-20f));
     return mul(a, 1.0f / len);
+}
+
+__device__ V3 reflect3(V3 incident, V3 normal) {
+    return sub(incident, mul(normal, 2.0f * dot3(incident, normal)));
 }
 
 struct CameraParams {
@@ -282,10 +334,10 @@ struct RenderParams {
     unsigned int height;
     unsigned int sphere_count;
     unsigned int plane_count;
+    unsigned int box_count;
     unsigned int material_count;
     unsigned int _pad0;
     unsigned int _pad1;
-    unsigned int _pad2;
 };
 
 __device__ V3 from_float4(float4 value) {
@@ -333,11 +385,178 @@ __device__ float hit_plane(V3 ray_origin, V3 ray_dir, V3 point, V3 normal) {
     return t > 0.001f ? t : -1.0f;
 }
 
+__device__ float hit_box(V3 ray_origin, V3 ray_dir, V3 center, V3 half_extents, V3* out_normal) {
+    float min_x = center.x - fabsf(half_extents.x);
+    float max_x = center.x + fabsf(half_extents.x);
+    float min_y = center.y - fabsf(half_extents.y);
+    float max_y = center.y + fabsf(half_extents.y);
+    float min_z = center.z - fabsf(half_extents.z);
+    float max_z = center.z + fabsf(half_extents.z);
+    float tmin = -1.0e20f;
+    float tmax = 1.0e20f;
+    V3 enter_normal = v3(0.0f, 0.0f, 0.0f);
+    V3 exit_normal = v3(0.0f, 0.0f, 0.0f);
+
+    if (fabsf(ray_dir.x) < 1.0e-6f) {
+        if (ray_origin.x < min_x || ray_origin.x > max_x) {
+            return -1.0f;
+        }
+    } else {
+        float inv = 1.0f / ray_dir.x;
+        float t1 = (min_x - ray_origin.x) * inv;
+        float t2 = (max_x - ray_origin.x) * inv;
+        V3 n1 = v3(-1.0f, 0.0f, 0.0f);
+        V3 n2 = v3(1.0f, 0.0f, 0.0f);
+        if (t1 > t2) {
+            float tmp_t = t1;
+            t1 = t2;
+            t2 = tmp_t;
+            V3 tmp_n = n1;
+            n1 = n2;
+            n2 = tmp_n;
+        }
+        if (t1 > tmin) {
+            tmin = t1;
+            enter_normal = n1;
+        }
+        if (t2 < tmax) {
+            tmax = t2;
+            exit_normal = n2;
+        }
+        if (tmin > tmax) {
+            return -1.0f;
+        }
+    }
+
+    if (fabsf(ray_dir.y) < 1.0e-6f) {
+        if (ray_origin.y < min_y || ray_origin.y > max_y) {
+            return -1.0f;
+        }
+    } else {
+        float inv = 1.0f / ray_dir.y;
+        float t1 = (min_y - ray_origin.y) * inv;
+        float t2 = (max_y - ray_origin.y) * inv;
+        V3 n1 = v3(0.0f, -1.0f, 0.0f);
+        V3 n2 = v3(0.0f, 1.0f, 0.0f);
+        if (t1 > t2) {
+            float tmp_t = t1;
+            t1 = t2;
+            t2 = tmp_t;
+            V3 tmp_n = n1;
+            n1 = n2;
+            n2 = tmp_n;
+        }
+        if (t1 > tmin) {
+            tmin = t1;
+            enter_normal = n1;
+        }
+        if (t2 < tmax) {
+            tmax = t2;
+            exit_normal = n2;
+        }
+        if (tmin > tmax) {
+            return -1.0f;
+        }
+    }
+
+    if (fabsf(ray_dir.z) < 1.0e-6f) {
+        if (ray_origin.z < min_z || ray_origin.z > max_z) {
+            return -1.0f;
+        }
+    } else {
+        float inv = 1.0f / ray_dir.z;
+        float t1 = (min_z - ray_origin.z) * inv;
+        float t2 = (max_z - ray_origin.z) * inv;
+        V3 n1 = v3(0.0f, 0.0f, -1.0f);
+        V3 n2 = v3(0.0f, 0.0f, 1.0f);
+        if (t1 > t2) {
+            float tmp_t = t1;
+            t1 = t2;
+            t2 = tmp_t;
+            V3 tmp_n = n1;
+            n1 = n2;
+            n2 = tmp_n;
+        }
+        if (t1 > tmin) {
+            tmin = t1;
+            enter_normal = n1;
+        }
+        if (t2 < tmax) {
+            tmax = t2;
+            exit_normal = n2;
+        }
+        if (tmin > tmax) {
+            return -1.0f;
+        }
+    }
+
+    if (tmin > 0.001f) {
+        *out_normal = enter_normal;
+        return tmin;
+    }
+    if (tmax > 0.001f) {
+        *out_normal = exit_normal;
+        return tmax;
+    }
+    return -1.0f;
+}
+
 __device__ V3 material_color(const GpuMaterial* materials, unsigned int material_count, unsigned int material_id) {
     if (material_id < material_count) {
         return from_gpu_vec3(materials[material_id].base_color);
     }
     return v3(0.8f, 0.2f, 0.8f);
+}
+
+__device__ V3 material_emission(const GpuMaterial* materials, unsigned int material_count, unsigned int material_id) {
+    if (material_id < material_count) {
+        return from_gpu_vec3(materials[material_id].emission);
+    }
+    return v3(0.0f, 0.0f, 0.0f);
+}
+
+__device__ unsigned int material_kind(const GpuMaterial* materials, unsigned int material_count, unsigned int material_id) {
+    if (material_id < material_count) {
+        return materials[material_id].material_kind;
+    }
+    return 0;
+}
+
+__device__ float material_roughness(const GpuMaterial* materials, unsigned int material_count, unsigned int material_id) {
+    if (material_id < material_count) {
+        return clamp01(materials[material_id].roughness);
+    }
+    return 0.8f;
+}
+
+__device__ V3 shade_material(
+    const GpuMaterial* materials,
+    unsigned int material_count,
+    unsigned int material_id,
+    V3 normal,
+    V3 light_dir,
+    V3 ray_dir
+) {
+    V3 base = material_color(materials, material_count, material_id);
+    V3 emission = material_emission(materials, material_count, material_id);
+    unsigned int kind = material_kind(materials, material_count, material_id);
+    if (kind == 1u) {
+        return add(base, emission);
+    }
+
+    float diffuse = fmaxf(dot3(normal, light_dir), 0.0f);
+    float ambient = kind == 2u ? 0.18f : 0.14f;
+    V3 shaded = mul(base, ambient + (1.0f - ambient) * diffuse);
+
+    if (kind == 3u) {
+        V3 reflected = norm(reflect3(ray_dir, normal));
+        float sky_t = clamp01(0.5f + 0.5f * reflected.y);
+        V3 sky = v3(0.48f + 0.22f * sky_t, 0.56f + 0.20f * sky_t, 0.70f + 0.24f * sky_t);
+        float metal_mix = (1.0f - material_roughness(materials, material_count, material_id)) * 0.55f;
+        shaded = mix3(shaded, sky, metal_mix);
+    }
+
+    return add(shaded, emission);
 }
 
 extern "C" __global__
@@ -347,6 +566,7 @@ void render_sensor_outputs(
     unsigned int* segmentation,
     const GpuSphere* spheres,
     const GpuPlane* planes,
+    const GpuBox* boxes,
     const GpuMaterial* materials,
     RenderParams params
 ) {
@@ -379,6 +599,7 @@ void render_sensor_outputs(
     V3 best_color = v3(0.55f + 0.20f * py, 0.70f + 0.12f * py, 0.92f);
     V3 best_normal = v3(0.0f, 1.0f, 0.0f);
     unsigned int best_object_id = 0;
+    unsigned int best_material_id = 0;
     int hit = 0;
 
     for (unsigned int sphere = 0; sphere < params.sphere_count; ++sphere) {
@@ -388,7 +609,7 @@ void render_sensor_outputs(
             best_t = t;
             V3 point = add(ray_origin, mul(ray_dir, t));
             best_normal = norm(sub(point, from_gpu_vec3(primitive.center)));
-            best_color = material_color(materials, params.material_count, primitive.material_id);
+            best_material_id = primitive.material_id;
             best_object_id = primitive.object_id;
             hit = 1;
         }
@@ -401,17 +622,41 @@ void render_sensor_outputs(
         float t = hit_plane(ray_origin, ray_dir, plane_point, plane_normal);
         if (t > 0.0f && t < best_t) {
             best_t = t;
-            best_color = material_color(materials, params.material_count, primitive.material_id);
+            best_material_id = primitive.material_id;
             best_normal = plane_normal;
             best_object_id = primitive.object_id;
             hit = 1;
         }
     }
 
+    for (unsigned int box = 0; box < params.box_count; ++box) {
+        GpuBox primitive = boxes[box];
+        V3 box_normal = v3(0.0f, 1.0f, 0.0f);
+        float t = hit_box(
+            ray_origin,
+            ray_dir,
+            from_gpu_vec3(primitive.center),
+            from_gpu_vec3(primitive.half_extents),
+            &box_normal
+        );
+        if (t > 0.0f && t < best_t) {
+            best_t = t;
+            best_material_id = primitive.material_id;
+            best_normal = box_normal;
+            best_object_id = primitive.object_id;
+            hit = 1;
+        }
+    }
+
     if (hit) {
-        float diffuse = fmaxf(dot3(best_normal, light_dir), 0.0f);
-        float shade = 0.16f + 0.84f * diffuse;
-        best_color = mul(best_color, shade);
+        best_color = shade_material(
+            materials,
+            params.material_count,
+            best_material_id,
+            best_normal,
+            light_dir,
+            ray_dir
+        );
     }
 
     rgb[i] = pack_rgb(best_color);
@@ -440,6 +685,7 @@ pub type Result<T> = std::result::Result<T, RocmRenderError>;
 pub fn build_gpu_scene_buffers(scene: &Scene) -> Result<HostSceneBuffers> {
     let mut spheres = Vec::new();
     let mut planes = Vec::new();
+    let mut boxes = Vec::new();
     let mut materials = Vec::new();
 
     for entity in scene.entities() {
@@ -448,9 +694,9 @@ pub fn build_gpu_scene_buffers(scene: &Scene) -> Result<HostSceneBuffers> {
         })?;
         materials.push(GpuMaterial {
             base_color: entity.material.base_color.into(),
-            emission: GpuVec3::default(),
+            emission: entity.material.emission.into(),
             roughness: entity.material.roughness,
-            material_kind: 0,
+            material_kind: entity.material.kind.gpu_id(),
             _pad0: 0,
             _pad1: 0,
         });
@@ -480,10 +726,20 @@ pub fn build_gpu_scene_buffers(scene: &Scene) -> Result<HostSceneBuffers> {
                     _pad1: 0,
                 });
             }
-            PrimitiveShape::Box { .. } => {
-                return Err(RocmRenderError::UnsupportedPrimitive {
-                    entity: entity.name.clone(),
-                    primitive: format!("{:?}", entity.shape),
+            PrimitiveShape::Box { half_extents } => {
+                let scale = entity.transform.scale;
+                let half_extents = half_extents.component_mul(Vec3::new(
+                    scale.x.abs(),
+                    scale.y.abs(),
+                    scale.z.abs(),
+                ));
+                boxes.push(GpuBox {
+                    center: entity.transform.translation.into(),
+                    half_extents: half_extents.into(),
+                    material_id,
+                    object_id: entity.object_id.get(),
+                    _pad0: 0,
+                    _pad1: 0,
                 });
             }
         }
@@ -492,6 +748,7 @@ pub fn build_gpu_scene_buffers(scene: &Scene) -> Result<HostSceneBuffers> {
     Ok(HostSceneBuffers {
         spheres,
         planes,
+        boxes,
         materials,
     })
 }
@@ -632,6 +889,7 @@ impl RocmSensorRenderer {
         let host = build_gpu_scene_buffers(scene)?;
         let sphere_count = host.sphere_count();
         let plane_count = host.plane_count();
+        let box_count = host.box_count();
         let material_count = host.material_count();
         let spheres = rocm_oxide::DeviceBuffer::from_slice(&host.spheres).map_err(|err| {
             RocmRenderError::RocmOxide {
@@ -645,6 +903,12 @@ impl RocmSensorRenderer {
                 message: err.to_string(),
             }
         })?;
+        let boxes = rocm_oxide::DeviceBuffer::from_slice(&host.boxes).map_err(|err| {
+            RocmRenderError::RocmOxide {
+                context: format!("uploading {box_count} box primitives"),
+                message: err.to_string(),
+            }
+        })?;
         let materials = rocm_oxide::DeviceBuffer::from_slice(&host.materials).map_err(|err| {
             RocmRenderError::RocmOxide {
                 context: format!("uploading {material_count} material records"),
@@ -655,9 +919,11 @@ impl RocmSensorRenderer {
         Ok(RocmScene {
             spheres,
             planes,
+            boxes,
             materials,
             sphere_count,
             plane_count,
+            box_count,
             material_count,
         })
     }
@@ -721,10 +987,10 @@ impl RocmSensorRenderer {
             height: camera.height,
             sphere_count: scene.sphere_count,
             plane_count: scene.plane_count,
+            box_count: scene.box_count,
             material_count: scene.material_count,
             _pad0: 0,
             _pad1: 0,
-            _pad2: 0,
         };
         let pixel_count = camera.pixel_count();
         if pixel_count == 0 {
@@ -771,6 +1037,7 @@ impl RocmSensorRenderer {
                 segmentation.as_mut_ptr(),
                 scene.spheres.as_ptr(),
                 scene.planes.as_ptr(),
+                scene.boxes.as_ptr(),
                 scene.materials.as_ptr(),
                 render_params,
             )
@@ -962,6 +1229,7 @@ mod tests {
 
         assert_eq!(buffers.plane_count(), 1);
         assert_eq!(buffers.sphere_count(), 3);
+        assert_eq!(buffers.box_count(), 0);
         assert_eq!(buffers.material_count(), 4);
         assert_eq!(buffers.planes[0].object_id, 1);
         assert_eq!(
@@ -996,20 +1264,29 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_box_reports_entity_name() {
+    fn box_scene_converts_to_gpu_buffers() {
         let mut scene = sim_core::Scene::new();
         scene.add_entity(Entity::new(
-            "box for later",
+            "box now",
             PrimitiveShape::box_with_half_extents(Vec3::splat(0.5)),
-            Transform::default(),
-            Material::default(),
+            Transform {
+                translation: Vec3::new(1.0, 0.5, -2.0),
+                rotation: sim_core::EulerRotation::from_degrees(0.0, 45.0, 0.0),
+                scale: Vec3::new(1.0, 2.0, 3.0),
+            },
+            Material::metal_preview(Vec3::new(0.65, 0.68, 0.72), 0.25),
             ObjectId::new(9),
         ));
 
-        let err = build_gpu_scene_buffers(&scene).unwrap_err();
+        let buffers = build_gpu_scene_buffers(&scene).unwrap();
+        let gpu_box = buffers.boxes[0];
 
-        assert!(err.to_string().contains("box for later"));
-        assert!(err.to_string().contains("Box"));
+        assert_eq!(buffers.box_count(), 1);
+        assert_eq!(gpu_box.center, GpuVec3::new(1.0, 0.5, -2.0));
+        assert_eq!(gpu_box.half_extents, GpuVec3::new(0.5, 1.0, 1.5));
+        assert_eq!(gpu_box.material_id, 0);
+        assert_eq!(gpu_box.object_id, 9);
+        assert_eq!(buffers.materials[0].material_kind, 3);
     }
 
     #[test]
@@ -1017,10 +1294,12 @@ mod tests {
         assert_eq!(size_of::<GpuVec3>(), 16);
         assert_eq!(size_of::<GpuSphere>(), 32);
         assert_eq!(size_of::<GpuPlane>(), 48);
+        assert_eq!(size_of::<GpuBox>(), 48);
         assert_eq!(size_of::<GpuMaterial>(), 48);
         assert_eq!(align_of::<GpuVec3>(), 4);
         assert_eq!(align_of::<GpuSphere>(), 4);
         assert_eq!(align_of::<GpuPlane>(), 4);
+        assert_eq!(align_of::<GpuBox>(), 4);
         assert_eq!(align_of::<GpuMaterial>(), 4);
     }
 
@@ -1048,6 +1327,7 @@ mod tests {
             .expect("scene upload should complete");
         assert_eq!(uploaded.sphere_count(), 3);
         assert_eq!(uploaded.plane_count(), 1);
+        assert_eq!(uploaded.box_count(), 0);
 
         let output = renderer
             .render_uploaded_scene_to_device(&uploaded, &sensor, metadata)
@@ -1067,6 +1347,51 @@ mod tests {
                 .pixels
                 .iter()
                 .any(|&object_id| object_id > 0)
+        );
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    #[ignore = "requires ROCm, HIPRTC, and a visible AMD GPU"]
+    fn uploads_and_renders_box_scene_with_rocm_backend() {
+        let mut scene = sim_core::Scene::new();
+        scene.add_entity(Entity::new(
+            "ground",
+            PrimitiveShape::plane(Vec3::Y, 0.0),
+            Transform::default(),
+            Material::matte(Vec3::new(0.55, 0.56, 0.52)),
+            ObjectId::new(1),
+        ));
+        scene.add_entity(Entity::new(
+            "red box",
+            PrimitiveShape::box_with_half_extents(Vec3::new(0.45, 0.45, 0.45)),
+            Transform::from_translation(Vec3::new(0.0, 0.45, -1.4)),
+            Material::matte(Vec3::new(0.85, 0.1, 0.08)),
+            ObjectId::new(6),
+        ));
+        let camera = sim_core::Camera::default_rgb().with_resolution(64, 36);
+        let sensor = RgbCameraSensor::new("rgb", camera);
+        let metadata = FrameMetadata::new(1, 0.0, sensor.id());
+        let renderer = RocmSensorRenderer::new().expect("ROCm renderer should initialize");
+
+        let uploaded = renderer
+            .upload_scene(&scene)
+            .expect("scene upload should complete");
+        assert_eq!(uploaded.box_count(), 1);
+
+        let output = renderer
+            .render_uploaded_scene_to_device(&uploaded, &sensor, metadata)
+            .and_then(|device_output| renderer.copy_all_to_host(&device_output))
+            .expect("ROCm box render should complete");
+
+        assert!(output.rgb.pixels.iter().any(|&pixel| pixel != 0));
+        assert!(output.depth.pixels.iter().any(|&depth| depth > 0.0));
+        assert!(
+            output
+                .segmentation
+                .pixels
+                .iter()
+                .any(|&object_id| object_id == 6)
         );
     }
 }

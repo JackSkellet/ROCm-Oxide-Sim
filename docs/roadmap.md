@@ -39,31 +39,57 @@
 - Reject unsupported boxes clearly until box intersection semantics are chosen.
 - Use the live viewer to inspect RGB/depth/segmentation correctness immediately.
 
-## Milestone 4: Dataset Generator Expansion
+## Milestone 4: Dataset Generator Expansion (Completed)
 
 - Expand camera paths and deterministic dataset seeds.
-- Add train/validation split metadata.
+- Add JSON config files and CLI overrides.
+- Add stronger per-frame metadata and dataset manifests.
+- Add validation command for generated datasets.
+- Keep train/validation split metadata deferred until dataset consumers need it.
 - Keep COCO/KITTI export deferred until the native frame contracts are stable.
 
-## Milestone 5: Physics Adapter
+## Milestone 5A: AABB/Box Support + Materials (Completed)
+
+- Added ROCm renderer support for `PrimitiveShape::Box` as world-space AABBs.
+- Defined the current box transform convention: translation and scale are used,
+  rotation is ignored.
+- Added simple material metadata and deterministic preview material kinds.
+- Improved scene variety for all camera sensors and datasets with
+  `examples/scenes/boxes_scene.json`.
+
+## Milestone 5B: Domain Randomization
+
+- Add deterministic scene/config randomization for primitive positions,
+  material colors/kinds, and camera path parameters.
+- Preserve reproducibility through explicit seeds and manifest metadata.
+- Keep randomization limited to supported primitives until mesh/BVH support
+  exists.
+
+## Milestone 5C: LiDAR/Raycast Sensor
+
+- Add raycast/LiDAR sensor traits and output contracts.
+- Reuse uploaded scene primitive intersection where practical.
+- Keep mesh/BVH support deferred until primitive raycasts are stable.
+
+## Milestone 6: Physics Adapter
 
 - Add rigid body descriptors and scene synchronization.
 - Integrate a first lightweight backend, likely Rapier.
 - Keep the backend behind traits.
 
-## Milestone 6: Robot Model / URDF
+## Milestone 7: Robot Model / URDF
 
 - Define robot model data structures.
 - Import URDF or a minimal subset.
 - Map robot links to renderable entities and physics bodies.
 
-## Milestone 7: ROS2 Bridge
+## Milestone 8: ROS2 Bridge
 
 - Add optional ROS2 publishing/subscription crates.
 - Export sensor streams with explicit timestamp and frame ID conventions.
 - Keep ROS2 optional so core tests remain dependency-light.
 
-## Milestone 8: Robotics-Lab App Integration
+## Milestone 9: Robotics-Lab App Integration
 
 - Build the higher-level application on top of this framework.
 - Compose scenes, sensors, datasets, viewer, physics, robots, and ROS2.

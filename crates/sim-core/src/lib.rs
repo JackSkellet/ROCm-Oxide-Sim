@@ -273,25 +273,99 @@ impl PrimitiveShape {
     }
 }
 
+/// Small material classifier used by preview renderers.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialKind {
+    Diffuse = 0,
+    Emissive = 1,
+    Matte = 2,
+    MetalPreview = 3,
+}
+
+impl MaterialKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Diffuse => "diffuse",
+            Self::Emissive => "emissive",
+            Self::Matte => "matte",
+            Self::MetalPreview => "metal_preview",
+        }
+    }
+
+    pub const fn gpu_id(self) -> u32 {
+        self as u32
+    }
+}
+
+impl Default for MaterialKind {
+    fn default() -> Self {
+        Self::Matte
+    }
+}
+
 /// A small physically-inspired material descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub base_color: Vec3,
+    #[serde(default)]
+    pub emission: Vec3,
     pub roughness: f32,
     pub metallic: f32,
+    #[serde(default)]
+    pub kind: MaterialKind,
 }
 
 impl Material {
     pub const fn new(base_color: Vec3, roughness: f32, metallic: f32) -> Self {
         Self {
             base_color,
+            emission: Vec3::ZERO,
             roughness,
             metallic,
+            kind: MaterialKind::Diffuse,
         }
     }
 
     pub const fn matte(base_color: Vec3) -> Self {
-        Self::new(base_color, 0.8, 0.0)
+        Self {
+            base_color,
+            emission: Vec3::ZERO,
+            roughness: 0.8,
+            metallic: 0.0,
+            kind: MaterialKind::Matte,
+        }
+    }
+
+    pub const fn emissive(base_color: Vec3, emission: Vec3) -> Self {
+        Self {
+            base_color,
+            emission,
+            roughness: 0.0,
+            metallic: 0.0,
+            kind: MaterialKind::Emissive,
+        }
+    }
+
+    pub const fn metal_preview(base_color: Vec3, roughness: f32) -> Self {
+        Self {
+            base_color,
+            emission: Vec3::ZERO,
+            roughness,
+            metallic: 1.0,
+            kind: MaterialKind::MetalPreview,
+        }
+    }
+
+    pub const fn with_kind(mut self, kind: MaterialKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub const fn with_emission(mut self, emission: Vec3) -> Self {
+        self.emission = emission;
+        self
     }
 }
 

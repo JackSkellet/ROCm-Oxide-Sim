@@ -1,4 +1,6 @@
-use sim_core::{Camera, Scene, Vec3};
+use sim_core::{
+    Camera, Entity, Material, MaterialKind, ObjectId, PrimitiveShape, Scene, Transform, Vec3,
+};
 use sim_sensors::{
     CameraIntrinsics, DepthFrame, DepthMetadata, FrameMetadata, FrameOutputMetadata,
     ObjectIdMetadata, RgbCameraSensor, RgbFrame, SegmentationFrame, SensorFrame, SensorPose,
@@ -96,4 +98,23 @@ fn scene_object_id_metadata_comes_from_scene_entities() {
         vec![0, 1, 2, 3, 4]
     );
     assert!(ids.iter().any(|entry| entry.label == "green sphere"));
+}
+
+#[test]
+fn scene_object_id_metadata_includes_primitive_and_material_kind() {
+    let mut scene = Scene::new();
+    scene.add_entity(Entity::new(
+        "red box",
+        PrimitiveShape::box_with_half_extents(Vec3::splat(0.5)),
+        Transform::from_translation(Vec3::new(0.0, 0.5, -1.0)),
+        Material::new(Vec3::new(0.9, 0.1, 0.1), 0.45, 0.0).with_kind(MaterialKind::Matte),
+        ObjectId::new(9),
+    ));
+
+    let ids = scene_object_ids(&scene);
+    let red_box = ids.iter().find(|entry| entry.id == 9).unwrap();
+
+    assert_eq!(red_box.label, "red box");
+    assert_eq!(red_box.primitive.as_deref(), Some("box"));
+    assert_eq!(red_box.material.as_deref(), Some("matte"));
 }

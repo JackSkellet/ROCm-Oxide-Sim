@@ -9,7 +9,7 @@
 //! - Segmentation: stable `u32` object IDs, with `0` for background/miss pixels.
 
 use serde::{Deserialize, Serialize};
-use sim_core::{Camera, ObjectId, Scene, Vec3};
+use sim_core::{Camera, ObjectId, PrimitiveShape, Scene, Vec3};
 use std::collections::BTreeMap;
 
 /// Shared interface for configured simulator sensors.
@@ -110,6 +110,10 @@ impl DepthMetadata {
 pub struct ObjectIdMetadata {
     pub id: u32,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
 }
 
 impl ObjectIdMetadata {
@@ -117,7 +121,19 @@ impl ObjectIdMetadata {
         Self {
             id,
             label: label.into(),
+            primitive: None,
+            material: None,
         }
+    }
+
+    pub fn with_primitive(mut self, primitive: impl Into<String>) -> Self {
+        self.primitive = Some(primitive.into());
+        self
+    }
+
+    pub fn with_material(mut self, material: impl Into<String>) -> Self {
+        self.material = Some(material.into());
+        self
     }
 }
 
@@ -140,15 +156,23 @@ pub fn scene_object_ids(scene: &Scene) -> Vec<ObjectIdMetadata> {
         if id == 0 {
             continue;
         }
-        scene_ids.entry(id).or_insert_with(|| entity.name.clone());
+        scene_ids.entry(id).or_insert_with(|| {
+            ObjectIdMetadata::new(id, entity.name.clone())
+                .with_primitive(primitive_label(entity.shape))
+                .with_material(entity.material.kind.as_str())
+        });
     }
 
-    object_ids.extend(
-        scene_ids
-            .into_iter()
-            .map(|(id, label)| ObjectIdMetadata::new(id, label)),
-    );
+    object_ids.extend(scene_ids.into_values());
     object_ids
+}
+
+fn primitive_label(shape: PrimitiveShape) -> &'static str {
+    match shape {
+        PrimitiveShape::Sphere { .. } => "sphere",
+        PrimitiveShape::Box { .. } => "box",
+        PrimitiveShape::Plane { .. } => "plane",
+    }
 }
 
 /// Metadata attached to every sensor frame.

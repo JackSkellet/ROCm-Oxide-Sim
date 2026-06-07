@@ -1,7 +1,132 @@
 # Dataset Generation
 
-The dataset writer keeps formats simple and dependency-light. The current layout
-is:
+Milestone 4 turns `apps/dataset_generator` into a reproducible synthetic dataset
+pipeline for the current RGB/depth/segmentation camera outputs.
+
+## Quickstart
+
+Generate four frames with the default scene and camera settings:
+
+```bash
+cargo run -p dataset_generator --features rocm -- --frames 4 --out target/sim_dataset --overwrite
+```
+
+Generate from a config file while overriding the output directory:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --config examples/datasets/basic_orbit.json \
+  --out target/sim_dataset_config \
+  --overwrite
+```
+
+Generate a dataset from the box/material fixture:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --scene examples/scenes/boxes_scene.json \
+  --frames 4 \
+  --out target/boxes_dataset \
+  --overwrite
+```
+
+Validate a generated dataset:
+
+```bash
+cargo run -p dataset_generator --features rocm -- validate --dataset target/sim_dataset
+```
+
+Preview a run without rendering or writing files:
+
+```bash
+cargo run -p dataset_generator -- --camera-path random --seed 1234 --frames 4 --dry-run
+```
+
+## CLI Options
+
+Generation accepts:
+
+```text
+--scene <PATH>
+--out <DIR>
+--frames <N>
+--width <N>
+--height <N>
+--camera-path static|orbit|line|random
+--seed <u64>
+--config <PATH>
+--overwrite
+--dry-run
+```
+
+Existing simple usage still works:
+
+```bash
+cargo run -p dataset_generator --features rocm -- --frames 4 --out target/sim_dataset --overwrite
+```
+
+The generator refuses to write into a non-empty output directory unless
+`--overwrite` is passed.
+
+## Config Files
+
+Config files are JSON and map to `DatasetConfig`:
+
+```json
+{
+  "scene_path": "examples/scenes/basic_scene.json",
+  "output_dir": "target/sim_dataset_config",
+  "frame_count": 16,
+  "width": 640,
+  "height": 360,
+  "camera_path": {
+    "kind": "orbit",
+    "target": { "x": 0.0, "y": 0.55, "z": -1.45 },
+    "radius": 4.1,
+    "height": 1.35,
+    "start_angle_degrees": 0.0,
+    "end_angle_degrees": 360.0,
+    "fov_y_degrees": 55.0
+  },
+  "seed": 20260608,
+  "outputs": {
+    "rgb": true,
+    "depth": true,
+    "depth_preview": true,
+    "segmentation": true,
+    "segmentation_preview": true,
+    "metadata": true
+  }
+}
+```
+
+CLI flags override config values where they refer to the same setting.
+
+## Camera Paths
+
+`static`
+
+Uses the same camera pose for every frame.
+
+`orbit`
+
+Moves around a target point at a fixed radius and height. This is the default
+config-file example path.
+
+`line`
+
+Interpolates camera position from a start pose to an end pose while looking at a
+fixed target.
+
+`random`
+
+Chooses deterministic pseudo-random camera positions inside configured bounds.
+The sequence is reproducible for the same `--seed`, frame count, image size, and
+path configuration.
+
+## Output Layout
+
+Frame numbering is 6 digits and starts at 1:
 
 ```text
 dataset/
@@ -14,32 +139,57 @@ dataset/
   dataset_manifest.json
 ```
 
-Generate a ROCm-backed dataset:
+## Per-Frame Metadata
 
-```bash
-cargo run -p dataset_generator --features rocm -- --frames 16 --out target/sim_dataset
-cargo run -p dataset_generator --features rocm -- --frames 4 --out target/sim_dataset --scene examples/scenes/basic_scene.json
-```
-
-Generate a CPU-preview smoke dataset:
-
-```bash
-cargo run -p dataset_generator -- --frames 4 --out target/sim_dataset
-```
-
-## Metadata
-
-Each per-frame metadata JSON includes:
+Each `metadata/frame_000001.json` includes:
 
 - Frame index and timestamp.
 - Sensor ID.
-- Depth convention: linear camera ray distance in meters, `0.0` for misses.
-- Output file paths and formats.
-- Active scene object ID mapping.
+- Seed and camera path type.
+- Camera position, forward/right/up vectors, and intrinsics.
+- Width and height.
+- Relative output file paths.
+- Scene file path when a scene file was used.
+- Object ID map.
+- Primitive type and material kind for scene-derived object IDs.
+- Renderer backend label, such as `rocm:gfx1201` or `cpu-preview`.
+- Depth convention: linear camera ray distance in meters, `0.0` for miss.
+- Segmentation convention: `u32` object IDs, `0` background.
+
+## Manifest
+
+`dataset_manifest.json` includes:
+
+- Dataset format version.
+- Generator name.
+- Scene path and config path when present.
+- Frame count, width, height, and seed.
+- Camera path config.
+- Enabled output set.
+- Object ID map.
+- Relative metadata path for every frame.
+- Depth and segmentation conventions.
+- Renderer backend label.
+
+Timestamps are intentionally omitted so manifest output remains deterministic.
+
+## Validation
+
+The validation command checks:
+
+- Manifest exists and parses.
+- Manifest frame count matches the frame list.
+- Expected output files exist.
+- Per-frame metadata files parse.
+- Object ID maps exist.
+- Metadata dimensions match manifest dimensions when present.
 
 ## Current Limitations
 
-- The ROCm renderer uploads only sphere and plane primitives today.
-- Box, mesh, BVH, OpenUSD, and URDF dataset geometry paths are deferred.
-- COCO, KITTI, ROS2 bags, and OpenUSD exports are not implemented.
-- Depth and segmentation are single-camera outputs, not LiDAR or physics output.
+- ROCm rendering supports sphere, plane, and world-space axis-aligned box
+  primitives.
+- Box rotation is ignored; only translation and scale affect uploaded boxes.
+- No meshes or BVH.
+- No domain randomization beyond deterministic camera paths.
+- No physics, LiDAR, ROS2, OpenUSD, or URDF.
+- Viewer presentation still uses ROCm -> host copy -> pixels upload.

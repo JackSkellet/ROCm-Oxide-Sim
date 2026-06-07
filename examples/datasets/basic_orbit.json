@@ -1,0 +1,29 @@
+{
+  "scene_path": "examples/scenes/basic_scene.json",
+  "output_dir": "target/sim_dataset_config",
+  "frame_count": 16,
+  "width": 640,
+  "height": 360,
+  "camera_path": {
+    "kind": "orbit",
+    "target": {
+      "x": 0.0,
+      "y": 0.55,
+      "z": -1.45
+    },
+    "radius": 4.1,
+    "height": 1.35,
+    "start_angle_degrees": 0.0,
+    "end_angle_degrees": 360.0,
+    "fov_y_degrees": 55.0
+  },
+  "seed": 20260608,
+  "outputs": {
+    "rgb": true,
+    "depth": true,
+    "depth_preview": true,
+    "segmentation": true,
+    "segmentation_preview": true,
+    "metadata": true
+  }
+}

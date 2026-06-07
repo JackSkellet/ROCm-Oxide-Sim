@@ -1,8 +1,14 @@
-use clap::Parser;
-use sim_core::{Camera, Scene, Vec3};
-use sim_datasets::{DatasetWriter, SensorImageSet};
-use sim_render_rocm::{RocmSensorRenderer, rocm_feature_enabled};
-use sim_sensors::{DepthMetadata, FrameMetadata, FrameOutputMetadata, RgbCameraSensor};
+use clap::{Parser, Subcommand, ValueEnum};
+use sim_core::Scene;
+use sim_datasets::{
+    CameraPathConfig, DatasetConfig, DatasetFrameMetadata, DatasetWriter, SensorImageSet,
+    camera_for_dataset_frame, frame_output_paths_for_selection, validate_dataset,
+};
+#[cfg(feature = "rocm")]
+use sim_render_rocm::RocmSensorRenderer;
+#[cfg(feature = "rocm")]
+use sim_sensors::FrameMetadata;
+use sim_sensors::{RgbCameraSensor, scene_object_ids};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,67 +16,183 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(about = "Generate a small RGB/depth/segmentation dataset from a simple camera path.")]
 struct Args {
-    #[arg(short = 'n', long, default_value_t = 8)]
-    frames: u64,
-    #[arg(long, default_value_t = 640)]
-    width: u32,
-    #[arg(long, default_value_t = 360)]
-    height: u32,
-    #[arg(
-        short = 'o',
-        long = "out",
-        alias = "output",
-        default_value = "target/dataset_generator"
-    )]
-    out: PathBuf,
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[arg(long)]
     scene: Option<PathBuf>,
+    #[arg(short = 'n', long)]
+    frames: Option<u32>,
+    #[arg(long)]
+    width: Option<u32>,
+    #[arg(long)]
+    height: Option<u32>,
+    #[arg(short = 'o', long = "out", alias = "output")]
+    out: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    camera_path: Option<CameraPathKind>,
+    #[arg(long)]
+    seed: Option<u64>,
+    #[arg(long)]
+    overwrite: bool,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Validate(ValidateArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ValidateArgs {
+    #[arg(long)]
+    dataset: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CameraPathKind {
+    Static,
+    Orbit,
+    Line,
+    Random,
+}
+
+impl CameraPathKind {
+    fn to_config(self) -> CameraPathConfig {
+        match self {
+            Self::Static => CameraPathConfig::static_default(),
+            Self::Orbit => CameraPathConfig::orbit_default(),
+            Self::Line => CameraPathConfig::line_default(),
+            Self::Random => CameraPathConfig::random_default(),
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let scene = load_scene(args.scene.as_deref())?;
-    let mut writer = DatasetWriter::new(&args.out)?;
-    println!("dataset_generator: scene entities={}", scene.len());
-
-    let renderer = match RocmSensorRenderer::new() {
-        Ok(renderer) => {
-            println!(
-                "dataset_generator: using ROCm-Oxide renderer on {}",
-                renderer.device_arch()
-            );
-            Some(renderer)
-        }
-        Err(err) if rocm_feature_enabled() => return Err(Box::new(err)),
-        Err(err) => {
-            println!("dataset_generator: ROCm renderer unavailable: {err}");
-            println!("dataset_generator: writing deterministic CPU preview outputs");
-            None
-        }
-    };
-
-    for frame_index in 1..=args.frames {
-        let timestamp_seconds = (frame_index - 1) as f64 / 30.0;
-        let camera = camera_for_frame(frame_index, args.width, args.height);
-        let sensor = RgbCameraSensor::new("rgb-main", camera);
-        let metadata =
-            metadata_for_dataset_frame(frame_index, timestamp_seconds, sensor.id(), &scene);
-
-        let images = if let Some(renderer) = &renderer {
-            let output = renderer.render_all_host(&scene, &sensor, metadata.clone())?;
-            SensorImageSet::from_frames(output.rgb, output.depth, output.segmentation)?
-        } else {
-            SensorImageSet::synthetic_preview(args.width, args.height, frame_index)
-        };
-
-        writer.write_sensor_outputs(frame_index, &images, &metadata)?;
+    if let Some(Command::Validate(validate)) = &args.command {
+        let report = validate_dataset(&validate.dataset)?;
+        println!(
+            "dataset_generator: validated {} frames in {}",
+            report.frame_count,
+            validate.dataset.display()
+        );
+        return Ok(());
     }
+
+    run_generate(args)
+}
+
+fn run_generate(args: Args) -> Result<(), Box<dyn Error>> {
+    let (config, config_path) = resolve_config(&args)?;
+    if args.dry_run {
+        print_dry_run(&config)?;
+        return Ok(());
+    }
+
+    prepare_output_dir(&config.output_dir, args.overwrite)?;
+
+    let scene = load_scene(config.scene_path.as_deref())?;
+    let object_ids = scene_object_ids(&scene);
+    println!("dataset_generator: scene entities={}", scene.len());
+    let render_session = RenderSession::open(&scene)?;
+
+    let mut writer = DatasetWriter::new_with_config(
+        &config.output_dir,
+        config.clone(),
+        config.scene_path.as_ref().map(path_to_string),
+        config_path.as_ref().map(path_to_string),
+        render_session.backend_label(),
+        object_ids.clone(),
+    )?;
+
+    render_dataset(&config, &object_ids, &render_session, &mut writer)?;
 
     let manifest = writer.finish()?;
     println!(
         "dataset_generator: wrote {} frames to {}",
         manifest.frame_count,
-        args.out.display()
+        config.output_dir.display()
+    );
+    Ok(())
+}
+
+fn resolve_config(args: &Args) -> Result<(DatasetConfig, Option<PathBuf>), Box<dyn Error>> {
+    let mut config = if let Some(path) = &args.config {
+        let json = fs::read_to_string(path)?;
+        serde_json::from_str::<DatasetConfig>(&json)
+            .map_err(|err| format!("failed to parse dataset config {}: {err}", path.display()))?
+    } else {
+        DatasetConfig::default()
+    };
+
+    if let Some(scene) = &args.scene {
+        config.scene_path = Some(scene.clone());
+    }
+    if let Some(out) = &args.out {
+        config.output_dir = out.clone();
+    }
+    if let Some(frames) = args.frames {
+        config.frame_count = frames;
+    }
+    if let Some(width) = args.width {
+        config.width = width;
+    }
+    if let Some(height) = args.height {
+        config.height = height;
+    }
+    if let Some(camera_path) = args.camera_path {
+        config.camera_path = camera_path.to_config();
+    }
+    if let Some(seed) = args.seed {
+        config.seed = seed;
+    }
+
+    Ok((config.normalized(), args.config.clone()))
+}
+
+fn prepare_output_dir(output_dir: &Path, overwrite: bool) -> Result<(), Box<dyn Error>> {
+    if output_dir.exists() {
+        let is_empty = output_dir.read_dir()?.next().is_none();
+        if !is_empty && !overwrite {
+            return Err(format!(
+                "output directory {} already exists and is not empty; pass --overwrite to replace it",
+                output_dir.display()
+            )
+            .into());
+        }
+        if overwrite {
+            fs::remove_dir_all(output_dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_dry_run(config: &DatasetConfig) -> Result<(), Box<dyn Error>> {
+    println!("dataset_generator: dry run");
+    println!("{}", serde_json::to_string_pretty(config)?);
+    println!("dataset_generator: planned output files");
+    for frame_index in 1..=config.frame_count {
+        let paths = frame_output_paths_for_selection(frame_index as u64, config.outputs);
+        for path in [
+            paths.rgb.as_deref(),
+            paths.depth.as_deref(),
+            paths.depth_preview.as_deref(),
+            paths.segmentation.as_deref(),
+            paths.segmentation_preview.as_deref(),
+            Some(paths.metadata.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            println!("  {}", config.output_dir.join(path).display());
+        }
+    }
+    println!(
+        "  {}",
+        config.output_dir.join("dataset_manifest.json").display()
     );
     Ok(())
 }
@@ -86,51 +208,170 @@ fn load_scene(path: Option<&Path>) -> Result<Scene, Box<dyn Error>> {
     }
 }
 
-fn camera_for_frame(frame_index: u64, width: u32, height: u32) -> Camera {
-    let t = (frame_index.saturating_sub(1) as f32) * 0.08;
-    let aspect_ratio = width.max(1) as f32 / height.max(1) as f32;
-    Camera::look_at(
-        Vec3::new(t.sin() * 0.65, 1.1, 4.5 + t.cos() * 0.25),
-        Vec3::new(0.0, 0.55, -1.45),
-        55.0,
-        aspect_ratio,
-    )
-    .with_resolution(width, height)
+fn render_dataset(
+    config: &DatasetConfig,
+    object_ids: &[sim_sensors::ObjectIdMetadata],
+    render_session: &RenderSession,
+    writer: &mut DatasetWriter,
+) -> Result<(), Box<dyn Error>> {
+    for frame_index in 1..=config.frame_count {
+        let timestamp_seconds = (frame_index - 1) as f64 / 30.0;
+        let camera = camera_for_dataset_frame(
+            &config.camera_path,
+            frame_index,
+            config.frame_count,
+            config.width,
+            config.height,
+            config.seed,
+        );
+        let sensor = RgbCameraSensor::new("rgb-main", camera);
+        let paths = frame_output_paths_for_selection(frame_index as u64, config.outputs);
+        let metadata = DatasetFrameMetadata::new(
+            frame_index as u64,
+            timestamp_seconds,
+            sensor.id(),
+            config.seed,
+            &config.camera_path,
+            sensor.camera(),
+            &paths,
+            config.scene_path.as_ref().map(path_to_string),
+            object_ids.to_vec(),
+            Some(render_session.backend_label()),
+        );
+
+        let images = render_session.render_images(&sensor, frame_index as u64)?;
+        writer.write_sensor_outputs(frame_index as u64, &images, &metadata)?;
+    }
+
+    Ok(())
 }
 
-fn metadata_for_dataset_frame(
-    frame_index: u64,
-    timestamp_seconds: f64,
-    sensor_id: &str,
-    scene: &Scene,
-) -> FrameMetadata {
-    let file_stem = format!("frame_{frame_index:06}");
-    FrameMetadata::new(frame_index, timestamp_seconds, sensor_id)
-        .with_depth(DepthMetadata::linear_ray_distance_meters())
-        .with_output(FrameOutputMetadata::new(
-            "rgb",
-            "ppm",
-            format!("rgb/{file_stem}.ppm"),
-        ))
-        .with_output(FrameOutputMetadata::new(
-            "depth",
-            "raw-f32-little-endian",
-            format!("depth/{file_stem}.f32"),
-        ))
-        .with_output(FrameOutputMetadata::new(
-            "depth_preview",
-            "pgm",
-            format!("depth_preview/{file_stem}.pgm"),
-        ))
-        .with_output(FrameOutputMetadata::new(
-            "segmentation",
-            "raw-u32-little-endian",
-            format!("segmentation/{file_stem}.u32"),
-        ))
-        .with_output(FrameOutputMetadata::new(
-            "segmentation_preview",
-            "ppm",
-            format!("segmentation_preview/{file_stem}.ppm"),
-        ))
-        .with_scene_object_ids(scene)
+enum RenderSession {
+    #[cfg(feature = "rocm")]
+    Rocm(RocmDatasetRenderer),
+    #[cfg(not(feature = "rocm"))]
+    CpuPreview,
+}
+
+impl RenderSession {
+    fn open(scene: &Scene) -> Result<Self, Box<dyn Error>> {
+        #[cfg(feature = "rocm")]
+        {
+            match RocmSensorRenderer::new() {
+                Ok(renderer) => {
+                    println!(
+                        "dataset_generator: using ROCm-Oxide renderer on {}",
+                        renderer.device_arch()
+                    );
+                    let uploaded_scene = renderer.upload_scene(scene)?;
+                    return Ok(Self::Rocm(RocmDatasetRenderer {
+                        backend_label: format!("rocm:{}", renderer.device_arch()),
+                        renderer,
+                        uploaded_scene,
+                    }));
+                }
+                Err(err) => return Err(Box::new(err)),
+            }
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = scene;
+            println!("dataset_generator: ROCm renderer unavailable: built without --features rocm");
+            println!("dataset_generator: writing deterministic CPU preview outputs");
+            Ok(Self::CpuPreview)
+        }
+    }
+
+    fn backend_label(&self) -> String {
+        match self {
+            #[cfg(feature = "rocm")]
+            Self::Rocm(rocm) => rocm.backend_label.clone(),
+            #[cfg(not(feature = "rocm"))]
+            Self::CpuPreview => "cpu-preview".to_string(),
+        }
+    }
+
+    fn render_images(
+        &self,
+        sensor: &RgbCameraSensor,
+        frame_index: u64,
+    ) -> Result<SensorImageSet, Box<dyn Error>> {
+        match self {
+            #[cfg(feature = "rocm")]
+            Self::Rocm(rocm) => {
+                let render_metadata =
+                    FrameMetadata::new(frame_index, frame_index as f64 / 30.0, sensor.id());
+                let output = rocm.renderer.render_uploaded_scene_to_device(
+                    &rocm.uploaded_scene,
+                    sensor,
+                    render_metadata,
+                )?;
+                let host = rocm.renderer.copy_all_to_host(&output)?;
+                Ok(SensorImageSet::from_frames(
+                    host.rgb,
+                    host.depth,
+                    host.segmentation,
+                )?)
+            }
+            #[cfg(not(feature = "rocm"))]
+            Self::CpuPreview => Ok(SensorImageSet::synthetic_preview(
+                sensor.intrinsics().width,
+                sensor.intrinsics().height,
+                frame_index,
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "rocm")]
+struct RocmDatasetRenderer {
+    backend_label: String,
+    renderer: RocmSensorRenderer,
+    uploaded_scene: sim_render_rocm::RocmScene,
+}
+
+fn path_to_string(path: &PathBuf) -> String {
+    path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_accepts_generation_flags_and_validate_subcommand() {
+        let generate = Args::try_parse_from([
+            "dataset_generator",
+            "--camera-path",
+            "random",
+            "--seed",
+            "1234",
+            "--frames",
+            "4",
+            "--out",
+            "target/sim_dataset",
+            "--overwrite",
+            "--dry-run",
+        ])
+        .unwrap();
+
+        assert_eq!(generate.frames, Some(4));
+        assert_eq!(generate.seed, Some(1234));
+        assert_eq!(generate.camera_path, Some(CameraPathKind::Random));
+        assert!(generate.overwrite);
+        assert!(generate.dry_run);
+
+        let validate = Args::try_parse_from([
+            "dataset_generator",
+            "validate",
+            "--dataset",
+            "target/sim_dataset",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            validate.command,
+            Some(Command::Validate(ValidateArgs { .. }))
+        ));
+    }
 }

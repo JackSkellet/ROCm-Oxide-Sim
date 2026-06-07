@@ -69,7 +69,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("sensor_lab: object IDs");
     for object in &metadata.object_ids {
-        println!("  {} = {}", object.id, object.label);
+        let primitive = object.primitive.as_deref().unwrap_or("unknown");
+        let material = object.material.as_deref().unwrap_or("unknown");
+        println!(
+            "  {} = {} primitive={} material={}",
+            object.id, object.label, primitive, material
+        );
     }
     println!("sensor_lab: wrote outputs");
     print_path(&rgb_path);

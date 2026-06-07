@@ -14,7 +14,11 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use sim_sensors::{DepthFrame, FrameMetadata, RgbFrame, SegmentationFrame};
+use sim_core::{Camera, Vec3};
+use sim_sensors::{
+    CameraIntrinsics, DepthFrame, FrameMetadata, FrameOutputMetadata, ObjectIdMetadata, RgbFrame,
+    SegmentationFrame,
+};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +35,550 @@ pub enum DatasetError {
 }
 
 pub type Result<T> = std::result::Result<T, DatasetError>;
+
+fn default_output_dir() -> PathBuf {
+    PathBuf::from("target/dataset_generator")
+}
+
+fn default_frame_count() -> u32 {
+    8
+}
+
+fn default_width() -> u32 {
+    640
+}
+
+fn default_height() -> u32 {
+    360
+}
+
+/// Output toggles for generated datasets.
+///
+/// Metadata is treated as a core dataset output by the writer and defaults to
+/// enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputSelection {
+    #[serde(default = "default_true")]
+    pub rgb: bool,
+    #[serde(default = "default_true")]
+    pub depth: bool,
+    #[serde(default = "default_true")]
+    pub depth_preview: bool,
+    #[serde(default = "default_true")]
+    pub segmentation: bool,
+    #[serde(default = "default_true")]
+    pub segmentation_preview: bool,
+    #[serde(default = "default_true")]
+    pub metadata: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl OutputSelection {
+    pub const fn all() -> Self {
+        Self {
+            rgb: true,
+            depth: true,
+            depth_preview: true,
+            segmentation: true,
+            segmentation_preview: true,
+            metadata: true,
+        }
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.metadata = true;
+        self
+    }
+}
+
+impl Default for OutputSelection {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// Camera path configuration used by the dataset generator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CameraPathConfig {
+    Static {
+        position: Vec3,
+        target: Vec3,
+        #[serde(default = "default_up")]
+        up: Vec3,
+        #[serde(default = "default_fov")]
+        fov_y_degrees: f32,
+    },
+    Orbit {
+        target: Vec3,
+        #[serde(default = "default_orbit_radius")]
+        radius: f32,
+        #[serde(default = "default_orbit_height")]
+        height: f32,
+        #[serde(default)]
+        start_angle_degrees: f32,
+        #[serde(default = "default_orbit_end_angle")]
+        end_angle_degrees: f32,
+        #[serde(default = "default_fov")]
+        fov_y_degrees: f32,
+    },
+    Line {
+        start_position: Vec3,
+        end_position: Vec3,
+        target: Vec3,
+        #[serde(default = "default_fov")]
+        fov_y_degrees: f32,
+    },
+    Random {
+        target: Vec3,
+        min_position: Vec3,
+        max_position: Vec3,
+        #[serde(default = "default_fov")]
+        fov_y_degrees: f32,
+    },
+}
+
+fn default_up() -> Vec3 {
+    Vec3::Y
+}
+
+fn default_fov() -> f32 {
+    55.0
+}
+
+fn default_orbit_radius() -> f32 {
+    4.1
+}
+
+fn default_orbit_height() -> f32 {
+    1.35
+}
+
+fn default_orbit_end_angle() -> f32 {
+    360.0
+}
+
+impl CameraPathConfig {
+    pub fn static_default() -> Self {
+        Self::Static {
+            position: Vec3::new(0.0, 1.1, 4.5),
+            target: Vec3::new(0.0, 0.55, -1.45),
+            up: Vec3::Y,
+            fov_y_degrees: 55.0,
+        }
+    }
+
+    pub fn orbit_default() -> Self {
+        Self::Orbit {
+            target: Vec3::new(0.0, 0.55, -1.45),
+            radius: 4.1,
+            height: 1.35,
+            start_angle_degrees: 0.0,
+            end_angle_degrees: 360.0,
+            fov_y_degrees: 55.0,
+        }
+    }
+
+    pub fn line_default() -> Self {
+        Self::Line {
+            start_position: Vec3::new(-0.9, 1.1, 4.6),
+            end_position: Vec3::new(0.9, 1.2, 3.7),
+            target: Vec3::new(0.0, 0.55, -1.45),
+            fov_y_degrees: 55.0,
+        }
+    }
+
+    pub fn random_default() -> Self {
+        Self::Random {
+            target: Vec3::new(0.0, 0.55, -1.45),
+            min_position: Vec3::new(-1.4, 0.85, 3.4),
+            max_position: Vec3::new(1.4, 1.75, 5.2),
+            fov_y_degrees: 55.0,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Static { .. } => "static",
+            Self::Orbit { .. } => "orbit",
+            Self::Line { .. } => "line",
+            Self::Random { .. } => "random",
+        }
+    }
+
+    pub fn start_position(&self) -> Option<Vec3> {
+        match self {
+            Self::Line { start_position, .. } => Some(*start_position),
+            _ => None,
+        }
+    }
+
+    pub fn end_position(&self) -> Option<Vec3> {
+        match self {
+            Self::Line { end_position, .. } => Some(*end_position),
+            _ => None,
+        }
+    }
+}
+
+impl Default for CameraPathConfig {
+    fn default() -> Self {
+        Self::static_default()
+    }
+}
+
+/// Top-level generator configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_path: Option<PathBuf>,
+    #[serde(default = "default_output_dir")]
+    pub output_dir: PathBuf,
+    #[serde(default = "default_frame_count")]
+    pub frame_count: u32,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default = "default_height")]
+    pub height: u32,
+    #[serde(default)]
+    pub camera_path: CameraPathConfig,
+    #[serde(default)]
+    pub seed: u64,
+    #[serde(default)]
+    pub outputs: OutputSelection,
+}
+
+impl Default for DatasetConfig {
+    fn default() -> Self {
+        Self {
+            scene_path: None,
+            output_dir: default_output_dir(),
+            frame_count: default_frame_count(),
+            width: default_width(),
+            height: default_height(),
+            camera_path: CameraPathConfig::default(),
+            seed: 0,
+            outputs: OutputSelection::all(),
+        }
+    }
+}
+
+impl DatasetConfig {
+    pub fn normalized(mut self) -> Self {
+        self.frame_count = self.frame_count.max(1);
+        self.width = self.width.max(1);
+        self.height = self.height.max(1);
+        self.outputs = self.outputs.normalized();
+        self
+    }
+}
+
+pub fn camera_for_dataset_frame(
+    config: &CameraPathConfig,
+    frame_index: u32,
+    frame_count: u32,
+    width: u32,
+    height: u32,
+    seed: u64,
+) -> Camera {
+    let frame_count = frame_count.max(1);
+    let frame_index = frame_index.clamp(1, frame_count);
+    let progress = if frame_count <= 1 {
+        0.0
+    } else {
+        (frame_index - 1) as f32 / (frame_count - 1) as f32
+    };
+    let aspect_ratio = width.max(1) as f32 / height.max(1) as f32;
+
+    let (position, target, fov_y_degrees) = match *config {
+        CameraPathConfig::Static {
+            position,
+            target,
+            fov_y_degrees,
+            ..
+        } => (position, target, fov_y_degrees),
+        CameraPathConfig::Orbit {
+            target,
+            radius,
+            height,
+            start_angle_degrees,
+            end_angle_degrees,
+            fov_y_degrees,
+        } => {
+            let angle = (start_angle_degrees
+                + (end_angle_degrees - start_angle_degrees) * progress)
+                .to_radians();
+            (
+                Vec3::new(
+                    angle.sin() * radius,
+                    height,
+                    target.z + angle.cos() * radius,
+                ),
+                target,
+                fov_y_degrees,
+            )
+        }
+        CameraPathConfig::Line {
+            start_position,
+            end_position,
+            target,
+            fov_y_degrees,
+        } => (
+            start_position + (end_position - start_position) * progress,
+            target,
+            fov_y_degrees,
+        ),
+        CameraPathConfig::Random {
+            target,
+            min_position,
+            max_position,
+            fov_y_degrees,
+        } => {
+            let mut rng = DeterministicRng::new(seed ^ ((frame_index as u64) << 32));
+            let position = Vec3::new(
+                rng.range_f32(min_position.x, max_position.x),
+                rng.range_f32(min_position.y, max_position.y),
+                rng.range_f32(min_position.z, max_position.z),
+            );
+            (position, target, fov_y_degrees)
+        }
+    };
+
+    Camera::look_at(position, target, fov_y_degrees, aspect_ratio).with_resolution(width, height)
+}
+
+struct DeterministicRng {
+    state: u64,
+}
+
+impl DeterministicRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed.wrapping_add(0x9e37_79b9_7f4a_7c15),
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut value = self.state;
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        let bits = (self.next_u64() >> 40) as u32;
+        bits as f32 / 16_777_215.0
+    }
+
+    fn range_f32(&mut self, min: f32, max: f32) -> f32 {
+        min + (max - min) * self.next_f32()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameOutputPaths {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segmentation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segmentation_preview: Option<String>,
+    pub metadata: String,
+}
+
+impl FrameOutputPaths {
+    pub fn to_manifest_frame(&self, frame_index: u64) -> ManifestFrame {
+        ManifestFrame {
+            frame_index,
+            rgb: self.rgb.clone(),
+            depth: self.depth.clone(),
+            depth_preview: self.depth_preview.clone(),
+            segmentation: self.segmentation.clone(),
+            segmentation_preview: self.segmentation_preview.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+
+    pub fn to_frame_outputs(&self) -> Vec<FrameOutputMetadata> {
+        let mut outputs = Vec::new();
+        if let Some(path) = &self.rgb {
+            outputs.push(FrameOutputMetadata::new("rgb", "ppm", path.clone()));
+        }
+        if let Some(path) = &self.depth {
+            outputs.push(FrameOutputMetadata::new(
+                "depth",
+                "raw-f32-little-endian",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &self.depth_preview {
+            outputs.push(FrameOutputMetadata::new(
+                "depth_preview",
+                "pgm",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &self.segmentation {
+            outputs.push(FrameOutputMetadata::new(
+                "segmentation",
+                "raw-u32-little-endian",
+                path.clone(),
+            ));
+        }
+        if let Some(path) = &self.segmentation_preview {
+            outputs.push(FrameOutputMetadata::new(
+                "segmentation_preview",
+                "ppm",
+                path.clone(),
+            ));
+        }
+        outputs.push(FrameOutputMetadata::new(
+            "metadata",
+            "json",
+            self.metadata.clone(),
+        ));
+        outputs
+    }
+}
+
+pub fn frame_output_paths(frame_index: u64) -> FrameOutputPaths {
+    frame_output_paths_for_selection(frame_index, OutputSelection::all())
+}
+
+pub fn frame_output_paths_for_selection(
+    frame_index: u64,
+    outputs: OutputSelection,
+) -> FrameOutputPaths {
+    let file_stem = format!("frame_{frame_index:06}");
+    let outputs = outputs.normalized();
+    FrameOutputPaths {
+        rgb: outputs.rgb.then(|| format!("rgb/{file_stem}.ppm")),
+        depth: outputs.depth.then(|| format!("depth/{file_stem}.f32")),
+        depth_preview: outputs
+            .depth_preview
+            .then(|| format!("depth_preview/{file_stem}.pgm")),
+        segmentation: outputs
+            .segmentation
+            .then(|| format!("segmentation/{file_stem}.u32")),
+        segmentation_preview: outputs
+            .segmentation_preview
+            .then(|| format!("segmentation_preview/{file_stem}.ppm")),
+        metadata: format!("metadata/{file_stem}.json"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DepthConventionMetadata {
+    pub convention: String,
+    pub units: String,
+    pub miss_value: f32,
+}
+
+impl DepthConventionMetadata {
+    pub fn linear_ray_distance_meters() -> Self {
+        Self {
+            convention: "linear camera ray distance".to_string(),
+            units: "meters".to_string(),
+            miss_value: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentationConventionMetadata {
+    pub convention: String,
+    pub background_id: u32,
+}
+
+impl SegmentationConventionMetadata {
+    pub fn object_ids_u32() -> Self {
+        Self {
+            convention: "u32 object IDs".to_string(),
+            background_id: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraFrameMetadata {
+    pub position: Vec3,
+    pub forward: Vec3,
+    pub right: Vec3,
+    pub up: Vec3,
+    pub intrinsics: CameraIntrinsics,
+}
+
+impl CameraFrameMetadata {
+    pub fn from_camera(camera: &Camera) -> Self {
+        Self {
+            position: camera.position,
+            forward: camera.forward,
+            right: camera.right(),
+            up: camera.up,
+            intrinsics: CameraIntrinsics::from_camera(camera),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetFrameMetadata {
+    pub frame_index: u64,
+    pub timestamp_seconds: f64,
+    pub sensor_id: String,
+    pub seed: u64,
+    pub camera_path: String,
+    pub camera: CameraFrameMetadata,
+    pub width: u32,
+    pub height: u32,
+    pub outputs: Vec<FrameOutputMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_path: Option<String>,
+    pub object_ids: Vec<ObjectIdMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renderer_backend: Option<String>,
+    pub depth_convention: DepthConventionMetadata,
+    pub segmentation_convention: SegmentationConventionMetadata,
+}
+
+impl DatasetFrameMetadata {
+    pub fn new(
+        frame_index: u64,
+        timestamp_seconds: f64,
+        sensor_id: impl Into<String>,
+        seed: u64,
+        camera_path: &CameraPathConfig,
+        camera: &Camera,
+        paths: &FrameOutputPaths,
+        scene_path: Option<String>,
+        object_ids: Vec<ObjectIdMetadata>,
+        renderer_backend: Option<String>,
+    ) -> Self {
+        Self {
+            frame_index,
+            timestamp_seconds,
+            sensor_id: sensor_id.into(),
+            seed,
+            camera_path: camera_path.kind().to_string(),
+            camera: CameraFrameMetadata::from_camera(camera),
+            width: camera.width,
+            height: camera.height,
+            outputs: paths.to_frame_outputs(),
+            scene_path,
+            object_ids,
+            renderer_backend,
+            depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
+            segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
+        }
+    }
+}
 
 /// Host RGB image in packed `0x00RRGGBB` format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +768,8 @@ impl SensorImageSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestFrame {
     pub frame_index: u64,
-    pub rgb: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depth: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,32 +781,140 @@ pub struct ManifestFrame {
     pub metadata: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetManifest {
-    pub format: String,
-    pub version: u32,
-    pub frame_count: usize,
+    pub dataset_format_version: u32,
+    pub generator: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    pub frame_count: u32,
+    pub width: u32,
+    pub height: u32,
+    pub seed: u64,
+    pub camera_path: CameraPathConfig,
+    pub outputs: OutputSelection,
+    pub object_ids: Vec<ObjectIdMetadata>,
     pub frames: Vec<ManifestFrame>,
+    pub depth_convention: DepthConventionMetadata,
+    pub segmentation_convention: SegmentationConventionMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renderer_backend: Option<String>,
+}
+
+impl DatasetManifest {
+    pub fn new(
+        frame_count: u32,
+        width: u32,
+        height: u32,
+        seed: u64,
+        camera_path: CameraPathConfig,
+        outputs: OutputSelection,
+    ) -> Self {
+        Self {
+            dataset_format_version: 1,
+            generator: "rocm-oxide-sim dataset_generator".to_string(),
+            scene_path: None,
+            config_path: None,
+            frame_count,
+            width,
+            height,
+            seed,
+            camera_path,
+            outputs: outputs.normalized(),
+            object_ids: Vec::new(),
+            frames: Vec::new(),
+            depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
+            segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
+            renderer_backend: None,
+        }
+    }
+
+    pub fn with_scene_path(mut self, scene_path: Option<String>) -> Self {
+        self.scene_path = scene_path;
+        self
+    }
+
+    pub fn with_config_path(mut self, config_path: Option<String>) -> Self {
+        self.config_path = config_path;
+        self
+    }
+
+    pub fn with_renderer_backend(mut self, renderer_backend: impl Into<String>) -> Self {
+        self.renderer_backend = Some(renderer_backend.into());
+        self
+    }
+
+    pub fn with_object_ids(mut self, object_ids: Vec<ObjectIdMetadata>) -> Self {
+        self.object_ids = object_ids;
+        self
+    }
+
+    pub fn with_frames(mut self, frames: Vec<ManifestFrame>) -> Self {
+        self.frame_count = frames.len() as u32;
+        self.frames = frames;
+        self
+    }
 }
 
 /// Writer for the initial RGB + metadata dataset layout.
 #[derive(Debug)]
 pub struct DatasetWriter {
     root: PathBuf,
+    config: DatasetConfig,
+    scene_path: Option<String>,
+    config_path: Option<String>,
+    renderer_backend: String,
+    object_ids: Vec<ObjectIdMetadata>,
     frames: Vec<ManifestFrame>,
 }
 
 impl DatasetWriter {
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_config(
+            root,
+            DatasetConfig::default(),
+            None,
+            None,
+            "unknown".to_string(),
+            Vec::new(),
+        )
+    }
+
+    pub fn new_with_config(
+        root: impl AsRef<Path>,
+        config: DatasetConfig,
+        scene_path: Option<String>,
+        config_path: Option<String>,
+        renderer_backend: String,
+        object_ids: Vec<ObjectIdMetadata>,
+    ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("rgb"))?;
-        fs::create_dir_all(root.join("depth"))?;
-        fs::create_dir_all(root.join("depth_preview"))?;
-        fs::create_dir_all(root.join("segmentation"))?;
-        fs::create_dir_all(root.join("segmentation_preview"))?;
+        let config = config.normalized();
+        if config.outputs.rgb {
+            fs::create_dir_all(root.join("rgb"))?;
+        }
+        if config.outputs.depth {
+            fs::create_dir_all(root.join("depth"))?;
+        }
+        if config.outputs.depth_preview {
+            fs::create_dir_all(root.join("depth_preview"))?;
+        }
+        if config.outputs.segmentation {
+            fs::create_dir_all(root.join("segmentation"))?;
+        }
+        if config.outputs.segmentation_preview {
+            fs::create_dir_all(root.join("segmentation_preview"))?;
+        }
         fs::create_dir_all(root.join("metadata"))?;
         Ok(Self {
             root,
+            config,
+            scene_path,
+            config_path,
+            renderer_backend,
+            object_ids,
             frames: Vec::new(),
         })
     }
@@ -268,22 +925,24 @@ impl DatasetWriter {
         image: &RgbImage,
         metadata: &FrameMetadata,
     ) -> Result<()> {
-        let file_stem = format!("frame_{frame_index:06}");
-        let rgb_relative = format!("rgb/{file_stem}.ppm");
-        let metadata_relative = format!("metadata/{file_stem}.json");
-
-        write_ppm(self.root.join(&rgb_relative), image)?;
-        write_metadata_json(self.root.join(&metadata_relative), metadata)?;
-
-        self.frames.push(ManifestFrame {
+        let paths = frame_output_paths_for_selection(
             frame_index,
-            rgb: rgb_relative,
-            depth: None,
-            depth_preview: None,
-            segmentation: None,
-            segmentation_preview: None,
-            metadata: metadata_relative,
-        });
+            OutputSelection {
+                rgb: true,
+                depth: false,
+                depth_preview: false,
+                segmentation: false,
+                segmentation_preview: false,
+                metadata: true,
+            },
+        );
+
+        if let Some(path) = &paths.rgb {
+            write_ppm(self.root.join(path), image)?;
+        }
+        write_metadata_json(self.root.join(&paths.metadata), metadata)?;
+
+        self.frames.push(paths.to_manifest_frame(frame_index));
         Ok(())
     }
 
@@ -291,45 +950,45 @@ impl DatasetWriter {
         &mut self,
         frame_index: u64,
         images: &SensorImageSet,
-        metadata: &FrameMetadata,
+        metadata: &impl Serialize,
     ) -> Result<()> {
-        let file_stem = format!("frame_{frame_index:06}");
-        let rgb_relative = format!("rgb/{file_stem}.ppm");
-        let depth_relative = format!("depth/{file_stem}.f32");
-        let depth_preview_relative = format!("depth_preview/{file_stem}.pgm");
-        let segmentation_relative = format!("segmentation/{file_stem}.u32");
-        let segmentation_preview_relative = format!("segmentation_preview/{file_stem}.ppm");
-        let metadata_relative = format!("metadata/{file_stem}.json");
+        let paths = frame_output_paths_for_selection(frame_index, self.config.outputs);
 
-        write_ppm(self.root.join(&rgb_relative), &images.rgb)?;
-        write_depth_f32(self.root.join(&depth_relative), &images.depth)?;
-        write_depth_preview_pgm(self.root.join(&depth_preview_relative), &images.depth)?;
-        write_segmentation_u32(self.root.join(&segmentation_relative), &images.segmentation)?;
-        write_segmentation_preview_ppm(
-            self.root.join(&segmentation_preview_relative),
-            &images.segmentation,
-        )?;
-        write_metadata_json(self.root.join(&metadata_relative), metadata)?;
+        if let Some(path) = &paths.rgb {
+            write_ppm(self.root.join(path), &images.rgb)?;
+        }
+        if let Some(path) = &paths.depth {
+            write_depth_f32(self.root.join(path), &images.depth)?;
+        }
+        if let Some(path) = &paths.depth_preview {
+            write_depth_preview_pgm(self.root.join(path), &images.depth)?;
+        }
+        if let Some(path) = &paths.segmentation {
+            write_segmentation_u32(self.root.join(path), &images.segmentation)?;
+        }
+        if let Some(path) = &paths.segmentation_preview {
+            write_segmentation_preview_ppm(self.root.join(path), &images.segmentation)?;
+        }
+        write_metadata_json(self.root.join(&paths.metadata), metadata)?;
 
-        self.frames.push(ManifestFrame {
-            frame_index,
-            rgb: rgb_relative,
-            depth: Some(depth_relative),
-            depth_preview: Some(depth_preview_relative),
-            segmentation: Some(segmentation_relative),
-            segmentation_preview: Some(segmentation_preview_relative),
-            metadata: metadata_relative,
-        });
+        self.frames.push(paths.to_manifest_frame(frame_index));
         Ok(())
     }
 
     pub fn finish(&self) -> Result<DatasetManifest> {
-        let manifest = DatasetManifest {
-            format: "rocm-oxide-sim-rgbd-segmentation".to_string(),
-            version: 1,
-            frame_count: self.frames.len(),
-            frames: self.frames.clone(),
-        };
+        let mut manifest = DatasetManifest::new(
+            self.frames.len() as u32,
+            self.config.width,
+            self.config.height,
+            self.config.seed,
+            self.config.camera_path.clone(),
+            self.config.outputs,
+        )
+        .with_scene_path(self.scene_path.clone())
+        .with_config_path(self.config_path.clone())
+        .with_object_ids(self.object_ids.clone())
+        .with_frames(self.frames.clone());
+        manifest.renderer_backend = Some(self.renderer_backend.clone());
         let path = self.root.join("dataset_manifest.json");
         let json = serde_json::to_string_pretty(&manifest)?;
         fs::write(path, json)?;
@@ -446,8 +1105,123 @@ pub fn segmentation_color(object_id: u32) -> u32 {
     }
 }
 
-pub fn write_metadata_json(path: impl AsRef<Path>, metadata: &FrameMetadata) -> Result<()> {
+pub fn write_metadata_json<T: Serialize>(path: impl AsRef<Path>, metadata: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(metadata)?;
     fs::write(path, json)?;
     Ok(())
+}
+
+#[derive(Debug, Error)]
+pub enum ValidationError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("missing expected file `{0}`")]
+    MissingFile(String),
+    #[error("invalid dataset manifest: {0}")]
+    InvalidManifest(String),
+    #[error("invalid frame metadata `{path}`: {message}")]
+    InvalidMetadata { path: String, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationReport {
+    pub frame_count: u32,
+}
+
+pub fn validate_dataset(
+    root: impl AsRef<Path>,
+) -> std::result::Result<ValidationReport, ValidationError> {
+    let root = root.as_ref();
+    let manifest_path = root.join("dataset_manifest.json");
+    if !manifest_path.exists() {
+        return Err(ValidationError::MissingFile(
+            "dataset_manifest.json".to_string(),
+        ));
+    }
+
+    let manifest: DatasetManifest = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    if manifest.frames.len() as u32 != manifest.frame_count {
+        return Err(ValidationError::InvalidManifest(format!(
+            "frame_count is {}, but frames has {} entries",
+            manifest.frame_count,
+            manifest.frames.len()
+        )));
+    }
+    if manifest.object_ids.is_empty() {
+        return Err(ValidationError::InvalidManifest(
+            "object ID map is empty".to_string(),
+        ));
+    }
+
+    for frame in &manifest.frames {
+        check_optional_file(root, frame.rgb.as_deref())?;
+        check_optional_file(root, frame.depth.as_deref())?;
+        check_optional_file(root, frame.depth_preview.as_deref())?;
+        check_optional_file(root, frame.segmentation.as_deref())?;
+        check_optional_file(root, frame.segmentation_preview.as_deref())?;
+        check_file(root, &frame.metadata)?;
+
+        let metadata_path = root.join(&frame.metadata);
+        let metadata_text = fs::read_to_string(&metadata_path)?;
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_text)?;
+        let object_ids = metadata
+            .get("object_ids")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| ValidationError::InvalidMetadata {
+                path: frame.metadata.clone(),
+                message: "missing object_ids array".to_string(),
+            })?;
+        if object_ids.is_empty() {
+            return Err(ValidationError::InvalidMetadata {
+                path: frame.metadata.clone(),
+                message: "object_ids array is empty".to_string(),
+            });
+        }
+        if let Some(width) = metadata.get("width").and_then(|value| value.as_u64())
+            && width as u32 != manifest.width
+        {
+            return Err(ValidationError::InvalidMetadata {
+                path: frame.metadata.clone(),
+                message: format!(
+                    "width {width} does not match manifest width {}",
+                    manifest.width
+                ),
+            });
+        }
+        if let Some(height) = metadata.get("height").and_then(|value| value.as_u64())
+            && height as u32 != manifest.height
+        {
+            return Err(ValidationError::InvalidMetadata {
+                path: frame.metadata.clone(),
+                message: format!(
+                    "height {height} does not match manifest height {}",
+                    manifest.height
+                ),
+            });
+        }
+    }
+
+    Ok(ValidationReport {
+        frame_count: manifest.frame_count,
+    })
+}
+
+fn check_optional_file(
+    root: &Path,
+    path: Option<&str>,
+) -> std::result::Result<(), ValidationError> {
+    if let Some(path) = path {
+        check_file(root, path)?;
+    }
+    Ok(())
+}
+
+fn check_file(root: &Path, path: &str) -> std::result::Result<(), ValidationError> {
+    if root.join(path).exists() {
+        Ok(())
+    } else {
+        Err(ValidationError::MissingFile(path.to_string()))
+    }
 }

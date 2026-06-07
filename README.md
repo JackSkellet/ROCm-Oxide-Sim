@@ -14,10 +14,14 @@ Isaac Sim replacement.
   physics types are available.
 - `sim-render-rocm` contains an opt-in ROCm-Oxide HIPRTC renderer for RGB,
   linear depth, and segmentation outputs from uploaded `sim-core::Scene`
-  sphere and plane primitives.
+  sphere, plane, and world-space axis-aligned box primitives.
 - `apps/sim_viewer` provides a live `winit + pixels` viewer for RGB, depth, and
   segmentation modes using a ROCm render -> host copy -> presentation path.
 - `examples/scenes/basic_scene.json` can be loaded by the CLIs with `--scene`.
+- `examples/scenes/boxes_scene.json` demonstrates box/AABB upload and simple
+  material kinds.
+- `examples/datasets/basic_orbit.json` demonstrates deterministic dataset
+  config-file generation.
 - LiDAR/raycast sensors, full physics, ROS2, OpenUSD, and robot model
   integration are planned but not implemented yet.
 
@@ -85,6 +89,7 @@ scene to GPU primitive buffers before rendering:
 ```bash
 cargo run -p sensor_lab --features rocm
 cargo run -p sensor_lab --features rocm -- --scene examples/scenes/basic_scene.json
+cargo run -p sensor_lab --features rocm -- --scene examples/scenes/boxes_scene.json
 ```
 
 The ROCm path writes:
@@ -101,9 +106,14 @@ target/sensor_lab/metadata.json
 Generate a small dataset:
 
 ```bash
-cargo run -p dataset_generator --features rocm -- --frames 16 --out target/sim_dataset
-cargo run -p dataset_generator --features rocm -- --frames 4 --out target/sim_dataset --scene examples/scenes/basic_scene.json
+cargo run -p dataset_generator --features rocm -- --frames 16 --out target/sim_dataset --overwrite
+cargo run -p dataset_generator --features rocm -- --config examples/datasets/basic_orbit.json --out target/sim_dataset --overwrite
+cargo run -p dataset_generator --features rocm -- --scene examples/scenes/boxes_scene.json --frames 4 --out target/boxes_dataset --overwrite
+cargo run -p dataset_generator --features rocm -- validate --dataset target/sim_dataset
 ```
+
+See [Dataset generation](docs/dataset_generation.md) for config files, camera
+paths, manifests, metadata, and validation.
 
 Run the live viewer:
 
@@ -112,6 +122,7 @@ cargo run -p sim_viewer --features rocm
 cargo run -p sim_viewer --features rocm -- --mode depth
 cargo run -p sim_viewer --features rocm -- --mode segmentation
 cargo run -p sim_viewer --features rocm -- --scene examples/scenes/basic_scene.json
+cargo run -p sim_viewer --features rocm -- --scene examples/scenes/boxes_scene.json
 ```
 
 Finite-frame smoke runs do not open a window:

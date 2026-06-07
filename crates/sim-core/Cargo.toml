@@ -10,3 +10,5 @@ description = "CPU-only scene, transform, camera, and material types for rocm-ox
 [dependencies]
 serde.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true

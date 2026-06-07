@@ -9,11 +9,13 @@ The current uploaded primitive subset is intentionally small:
 
 - `PrimitiveShape::Sphere`
 - `PrimitiveShape::Plane`
+- `PrimitiveShape::Box { half_extents }`
 
-`PrimitiveShape::Box` is present in `sim-core`, but the ROCm renderer rejects it
-for now with an unsupported-primitive error. Triangle meshes, BVH acceleration,
-OpenUSD, URDF, physics bodies, LiDAR, and ROS2 integration are not part of this
-milestone.
+Boxes are axis-aligned in world space for now. The uploaded `GpuBox` center is
+the entity transform translation and half-extents are multiplied by absolute
+transform scale. Entity rotation is ignored for boxes until oriented boxes need
+a dedicated representation. Triangle meshes, BVH acceleration, OpenUSD, URDF,
+physics bodies, LiDAR, and ROS2 integration are not part of this milestone.
 
 ## GPU Buffer Layout
 
@@ -23,6 +25,7 @@ milestone.
 GpuVec3      x, y, z, _pad                 16 bytes
 GpuSphere    center, radius, material_id, object_id, pad
 GpuPlane     point, normal, material_id, object_id, pads
+GpuBox       center, half_extents, material_id, object_id, pads
 GpuMaterial  base_color, emission, roughness, material_kind, pads
 ```
 
@@ -40,6 +43,7 @@ sim_core::Scene
   -> RocmScene {
        DeviceBuffer<GpuSphere>,
        DeviceBuffer<GpuPlane>,
+       DeviceBuffer<GpuBox>,
        DeviceBuffer<GpuMaterial>,
        counts
      }
@@ -48,7 +52,24 @@ sim_core::Scene
 Each entity contributes one material record. Sphere centers come from the
 entity transform translation, with radius scaled by the largest absolute scale
 component. Plane normals are transformed and normalized, and plane points are
-derived from the local plane offset and entity transform.
+derived from the local plane offset and entity transform. Box centers come from
+the entity transform translation and half-extents are scaled per axis by the
+absolute transform scale; rotation is ignored.
+
+## Materials
+
+`sim-core::Material` now carries:
+
+- `base_color`
+- `emission`
+- `roughness`
+- `metallic`
+- `kind`: `diffuse`, `matte`, `emissive`, or `metal_preview`
+
+The ROCm renderer keeps shading deterministic. Diffuse and matte materials use
+simple direct light plus ambient. Emissive materials add visible emission.
+`metal_preview` blends toward a reflected sky tint; it is a visual preview, not
+a physically based metal model.
 
 ## Object IDs
 
@@ -67,11 +88,21 @@ The default smoke scene still uses:
 4 blue sphere
 ```
 
+`examples/scenes/boxes_scene.json` adds:
+
+```text
+5 red box
+6 metal preview box
+7 blue emissive sphere
+```
+
 ## Kernel Approach
 
-The HIPRTC kernel receives sphere, plane, and material buffers plus a compact
-render parameter struct. It performs simple linear intersection loops and writes
-RGB, linear ray-distance depth, and segmentation in one pass.
+The HIPRTC kernel receives sphere, plane, box, and material buffers plus a
+compact render parameter struct. It performs simple linear intersection loops
+and writes RGB, linear ray-distance depth, and segmentation in one pass. Box
+intersection uses a slab test against a world-space AABB and returns an
+approximate face normal for shading.
 
 There is no acceleration structure, mesh path, dynamic GPU mutation API, or
 zero-copy presentation path yet.

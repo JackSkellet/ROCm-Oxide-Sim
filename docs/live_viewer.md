@@ -19,6 +19,7 @@ Live window:
 ```bash
 cargo run -p sim_viewer --features rocm
 cargo run -p sim_viewer --features rocm -- --scene examples/scenes/basic_scene.json
+cargo run -p sim_viewer --features rocm -- --scene examples/scenes/boxes_scene.json
 ```
 
 Start in a specific display mode:
@@ -79,6 +80,10 @@ are brighter.
 
 Segmentation displays the shared object-ID color mapping from `sim-datasets`.
 
+The viewer uses the same uploaded scene path as the dataset generator and
+sensor lab. It can inspect sphere, plane, and world-space axis-aligned box
+primitives. Box rotation is ignored by the renderer for now.
+
 ## Performance Notes
 
 Every frame currently copies ROCm output buffers back to host memory and uploads
@@ -90,4 +95,4 @@ Future work:
 - Direct HIP/Vulkan external memory interop.
 - Avoiding repeated preview allocation.
 - Presenting multiple synchronized views.
-- Broader scene support beyond spheres and planes.
+- Broader scene support beyond the current sphere, plane, and AABB subset.

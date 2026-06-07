@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Added Milestone 5A ROCm scene upload support for `PrimitiveShape::Box` as a
+  world-space AABB primitive.
+- Added `GpuBox` buffers and HIPRTC ray/AABB slab intersection alongside the
+  existing sphere and plane loops.
+- Added simple material kinds (`diffuse`, `matte`, `emissive`,
+  `metal_preview`) with deterministic preview shading.
+- Expanded object ID metadata with primitive type and material kind fields.
+- Added `examples/scenes/boxes_scene.json` for box/material dataset and viewer
+  smoke runs.
+- Added Milestone 4 dataset config support through `DatasetConfig` and
+  `examples/datasets/basic_orbit.json`.
+- Added deterministic `static`, `orbit`, `line`, and seeded `random` camera
+  paths for dataset generation.
+- Added stronger per-frame dataset metadata with camera pose, intrinsics,
+  output paths, scene path, backend label, seed, and sensor conventions.
+- Expanded `dataset_manifest.json` with reproducibility fields, camera path
+  config, output selection, object IDs, and convention metadata.
+- Added `dataset_generator validate --dataset <DIR>` for simple dataset checks.
+- Added `--overwrite` and `--dry-run` dataset generator behavior.
 - Added Milestone 3 ROCm scene upload from `sim-core::Scene` to GPU primitive
   buffers.
 - Added GPU-facing sphere, plane, material, and render parameter ABI structs for

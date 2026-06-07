@@ -1,0 +1,186 @@
+{
+  "entities": [
+    {
+      "id": 1,
+      "name": "ground",
+      "shape": {
+        "Plane": {
+          "normal": {
+            "x": 0.0,
+            "y": 1.0,
+            "z": 0.0
+          },
+          "offset": 0.0
+        }
+      },
+      "transform": {
+        "translation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "material": {
+        "base_color": {
+          "x": 0.55,
+          "y": 0.56,
+          "z": 0.52
+        },
+        "emission": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "roughness": 0.8,
+        "metallic": 0.0,
+        "kind": "matte"
+      },
+      "object_id": 1
+    },
+    {
+      "id": 2,
+      "name": "red box",
+      "shape": {
+        "Box": {
+          "half_extents": {
+            "x": 0.45,
+            "y": 0.45,
+            "z": 0.45
+          }
+        }
+      },
+      "transform": {
+        "translation": {
+          "x": -0.55,
+          "y": 0.45,
+          "z": -1.35
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "material": {
+        "base_color": {
+          "x": 0.88,
+          "y": 0.08,
+          "z": 0.06
+        },
+        "emission": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "roughness": 0.55,
+        "metallic": 0.0,
+        "kind": "matte"
+      },
+      "object_id": 5
+    },
+    {
+      "id": 3,
+      "name": "metal preview box",
+      "shape": {
+        "Box": {
+          "half_extents": {
+            "x": 0.35,
+            "y": 0.6,
+            "z": 0.35
+          }
+        }
+      },
+      "transform": {
+        "translation": {
+          "x": 0.65,
+          "y": 0.6,
+          "z": -1.8
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "material": {
+        "base_color": {
+          "x": 0.62,
+          "y": 0.66,
+          "z": 0.72
+        },
+        "emission": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "roughness": 0.25,
+        "metallic": 1.0,
+        "kind": "metal_preview"
+      },
+      "object_id": 6
+    },
+    {
+      "id": 4,
+      "name": "blue emissive sphere",
+      "shape": {
+        "Sphere": {
+          "radius": 0.28
+        }
+      },
+      "transform": {
+        "translation": {
+          "x": 0.05,
+          "y": 0.95,
+          "z": -1.55
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "material": {
+        "base_color": {
+          "x": 0.08,
+          "y": 0.22,
+          "z": 0.95
+        },
+        "emission": {
+          "x": 0.02,
+          "y": 0.06,
+          "z": 0.18
+        },
+        "roughness": 0.0,
+        "metallic": 0.0,
+        "kind": "emissive"
+      },
+      "object_id": 7
+    }
+  ],
+  "next_id": 5
+}
