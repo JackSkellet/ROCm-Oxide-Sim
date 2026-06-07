@@ -1,0 +1,12 @@
+[package]
+name = "sim-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CPU-only scene, transform, camera, and material types for rocm-oxide-sim."
+
+[dependencies]
+serde.workspace = true
+

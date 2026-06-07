@@ -1,0 +1,93 @@
+# Live Viewer
+
+Milestone 2 adds a live viewer in `apps/sim_viewer`.
+
+The viewer uses this presentation path:
+
+```text
+ROCm render -> host copy -> preview conversion -> winit + pixels upload
+```
+
+This is intentionally simple. It does not use HIP/Vulkan external memory interop
+yet. On native Linux, `pixels` presents through `wgpu`, which commonly uses a
+Vulkan backend, but the current integration is not zero-copy Vulkan interop.
+
+## Run
+
+Live window:
+
+```bash
+cargo run -p sim_viewer --features rocm
+cargo run -p sim_viewer --features rocm -- --scene examples/scenes/basic_scene.json
+```
+
+Start in a specific display mode:
+
+```bash
+cargo run -p sim_viewer --features rocm -- --mode rgb
+cargo run -p sim_viewer --features rocm -- --mode depth
+cargo run -p sim_viewer --features rocm -- --mode segmentation
+```
+
+Finite-frame smoke mode for noninteractive verification:
+
+```bash
+cargo run -p sim_viewer --features rocm -- --frames 4 --mode rgb
+```
+
+Options:
+
+```text
+--width <N>          default 1280
+--height <N>         default 720
+--mode <MODE>        rgb | depth | segmentation
+--frames <N>         finite headless smoke run
+--camera <MODE>      static | orbit
+--scene <PATH>       optional serde JSON sim-core scene
+```
+
+## Controls
+
+Windowed mode supports:
+
+```text
+1        RGB
+2        Depth preview
+3        Segmentation preview
+R        Reset camera
+Esc      Quit
+W/S      Move forward/back
+A/D      Strafe left/right
+Arrows   Look
+Shift    Faster movement
+```
+
+`--camera orbit` runs an animated orbit camera. The finite-frame smoke path also
+supports orbit mode:
+
+```bash
+cargo run -p sim_viewer --features rocm -- --frames 120 --camera orbit
+```
+
+## Display Modes
+
+RGB displays packed `0x00RRGGBB` pixels.
+
+Depth displays the existing depth preview convention: `0.0` background/miss
+depth is black, finite positive depth is normalized per frame, and nearer pixels
+are brighter.
+
+Segmentation displays the shared object-ID color mapping from `sim-datasets`.
+
+## Performance Notes
+
+Every frame currently copies ROCm output buffers back to host memory and uploads
+an RGBA preview to the window. This keeps the implementation reliable and easy
+to inspect, but it is not the final low-latency presentation path.
+
+Future work:
+
+- Direct HIP/Vulkan external memory interop.
+- Avoiding repeated preview allocation.
+- Presenting multiple synchronized views.
+- Broader scene support beyond spheres and planes.

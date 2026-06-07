@@ -1,0 +1,20 @@
+[package]
+name = "sensor_lab"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One-frame sensor rendering CLI for rocm-oxide-sim."
+
+[features]
+default = []
+rocm = ["sim-render-rocm/rocm"]
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+sim-core.workspace = true
+sim-datasets.workspace = true
+sim-render-rocm.workspace = true
+sim-sensors.workspace = true

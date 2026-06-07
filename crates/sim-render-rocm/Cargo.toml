@@ -1,0 +1,19 @@
+[package]
+name = "sim-render-rocm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ROCm-Oxide GPU sensor renderer for rocm-oxide-sim."
+
+[features]
+default = []
+rocm = ["dep:rocm-oxide"]
+
+[dependencies]
+rocm-oxide = { workspace = true, optional = true }
+sim-core.workspace = true
+sim-sensors.workspace = true
+thiserror.workspace = true
+

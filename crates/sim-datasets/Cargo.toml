@@ -1,0 +1,18 @@
+[package]
+name = "sim-datasets"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dataset export helpers for rocm-oxide-sim."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sim-sensors.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+

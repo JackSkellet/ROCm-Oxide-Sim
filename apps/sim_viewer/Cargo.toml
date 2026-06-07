@@ -1,0 +1,22 @@
+[package]
+name = "sim_viewer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Skeleton viewer CLI for rocm-oxide-sim."
+
+[features]
+default = []
+rocm = ["sim-render-rocm/rocm"]
+
+[dependencies]
+clap.workspace = true
+pixels.workspace = true
+serde_json.workspace = true
+sim-core.workspace = true
+sim-datasets.workspace = true
+sim-render-rocm.workspace = true
+sim-sensors.workspace = true
+winit.workspace = true
