@@ -76,12 +76,21 @@
 - Added LiDAR config, metadata, manifest, and validation support.
 - Kept mesh/BVH, noise, multi-return, and robot-relative rig semantics deferred.
 
-## Milestone 6B: SensorRig + ScenarioConfig
+## Milestone 6B: SensorRig + ScenarioConfig (Completed)
 
-- Define reusable rigs that attach cameras and LiDAR sensors to a common frame.
-- Add scenario-level config that composes scene, camera path, LiDAR config,
-  output selection, and randomization.
-- Keep app orchestration outside the core renderer.
+- Added reusable `SensorRig`, `SensorMount`, and mounted sensor config types.
+- Added `ScenarioConfig` for scene path, rig, dataset job, and randomization.
+- Added scenario support in `dataset_generator`, `sensor_lab`, and
+  `sim_viewer`.
+- Added scenario/rig/sensor metadata to frame JSON, manifests, and validation.
+- Kept multi-sensor output directories and robot-mounted rigs deferred.
+
+## Milestone 6C: Robotics-Lab App Shell
+
+- Start the downstream `rocm-oxide-robotics-lab` app repo.
+- Use this framework's `ScenarioConfig` instead of duplicating scene/sensor
+  orchestration.
+- Keep app-specific UX outside `rocm-oxide-sim`.
 
 ## Milestone 7: Physics Adapter
 

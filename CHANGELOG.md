@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added Milestone 6B `SensorRig`, `SensorMount`, mounted sensor configs, and
+  `ScenarioConfig`.
+- Added scenario dataset generation with shared scene path, rig, dataset job,
+  domain randomization, and LiDAR settings.
+- Added scenario metadata/manifest fields plus validation for scenario sensor
+  lists and per-frame scenario sections.
+- Added `--scenario` support to `dataset_generator`, `sensor_lab`, and
+  `sim_viewer`.
+- Added `examples/scenarios/basic_sensor_rig.json` and
+  `examples/scenarios/randomized_boxes_rig.json`.
 - Added Milestone 6A LiDAR/raycast sensor contracts with deterministic
   spherical scan configuration.
 - Added ROCm LiDAR raycast rendering over uploaded sphere, plane, and AABB box

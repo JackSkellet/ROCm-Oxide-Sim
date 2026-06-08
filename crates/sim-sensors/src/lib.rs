@@ -459,6 +459,172 @@ impl Sensor for LidarSensor {
     }
 }
 
+/// Pinhole camera configuration used by sensor rigs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CameraSensorConfig {
+    #[serde(default = "default_camera_width")]
+    pub width: u32,
+    #[serde(default = "default_camera_height")]
+    pub height: u32,
+    #[serde(default = "default_camera_vertical_fov_degrees")]
+    pub vertical_fov_degrees: f32,
+}
+
+fn default_camera_width() -> u32 {
+    640
+}
+
+fn default_camera_height() -> u32 {
+    360
+}
+
+fn default_camera_vertical_fov_degrees() -> f32 {
+    55.0
+}
+
+impl Default for CameraSensorConfig {
+    fn default() -> Self {
+        Self {
+            width: default_camera_width(),
+            height: default_camera_height(),
+            vertical_fov_degrees: default_camera_vertical_fov_degrees(),
+        }
+    }
+}
+
+impl CameraSensorConfig {
+    pub fn normalized(mut self) -> Self {
+        self.width = self.width.max(1);
+        self.height = self.height.max(1);
+        self.vertical_fov_degrees = self.vertical_fov_degrees.max(1.0);
+        self
+    }
+
+    pub fn to_camera(self, world_transform: Transform) -> Camera {
+        let config = self.normalized();
+        Camera {
+            position: world_transform.translation,
+            forward: world_transform.transform_direction(Vec3::new(0.0, 0.0, -1.0)),
+            up: world_transform.transform_direction(Vec3::Y),
+            vertical_fov_degrees: config.vertical_fov_degrees,
+            aspect_ratio: config.width as f32 / config.height as f32,
+            near: 0.01,
+            far: 1_000.0,
+            width: config.width,
+            height: config.height,
+        }
+    }
+}
+
+/// Sensor configuration that can be mounted on a shared rig.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SensorConfig {
+    RgbCamera(CameraSensorConfig),
+    DepthCamera(CameraSensorConfig),
+    SegmentationCamera(CameraSensorConfig),
+    Lidar(LidarConfig),
+}
+
+impl SensorConfig {
+    pub fn sensor_type(&self) -> &'static str {
+        match self {
+            Self::RgbCamera(_) => "rgb_camera",
+            Self::DepthCamera(_) => "depth_camera",
+            Self::SegmentationCamera(_) => "segmentation_camera",
+            Self::Lidar(_) => "lidar",
+        }
+    }
+
+    pub fn camera_config(&self) -> Option<CameraSensorConfig> {
+        match self {
+            Self::RgbCamera(config)
+            | Self::DepthCamera(config)
+            | Self::SegmentationCamera(config) => Some(*config),
+            Self::Lidar(_) => None,
+        }
+    }
+
+    pub fn lidar_config(&self) -> Option<LidarConfig> {
+        match self {
+            Self::Lidar(config) => Some(*config),
+            _ => None,
+        }
+    }
+}
+
+/// A named sensor mount relative to a [`SensorRig`] base transform.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SensorMount {
+    pub name: String,
+    pub sensor: SensorConfig,
+    #[serde(default)]
+    pub transform: Transform,
+}
+
+/// A group of sensors mounted relative to a common base transform.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SensorRig {
+    pub name: String,
+    #[serde(default)]
+    pub base_transform: Transform,
+    #[serde(default)]
+    pub mounts: Vec<SensorMount>,
+}
+
+impl SensorRig {
+    pub fn sensor_names(&self) -> Vec<&str> {
+        self.mounts
+            .iter()
+            .map(|mount| mount.name.as_str())
+            .collect()
+    }
+
+    pub fn world_transform_for_mount(&self, name: &str) -> Option<Transform> {
+        self.mounts
+            .iter()
+            .find(|mount| mount.name == name)
+            .map(|mount| self.base_transform.compose(mount.transform))
+    }
+
+    pub fn sensor_summary(&self) -> Vec<SensorSummary> {
+        self.mounts
+            .iter()
+            .map(|mount| SensorSummary {
+                name: mount.name.clone(),
+                sensor_type: mount.sensor.sensor_type().to_string(),
+                mount_transform: mount.transform,
+                world_transform: self.base_transform.compose(mount.transform),
+            })
+            .collect()
+    }
+
+    pub fn primary_camera(&self) -> Option<(&SensorMount, Camera)> {
+        self.mounts.iter().find_map(|mount| {
+            let config = mount.sensor.camera_config()?;
+            let world = self.base_transform.compose(mount.transform);
+            Some((mount, config.to_camera(world)))
+        })
+    }
+
+    pub fn primary_lidar(&self) -> Option<(&SensorMount, LidarConfig)> {
+        self.mounts.iter().find_map(|mount| {
+            let mut config = mount.sensor.lidar_config()?;
+            let world = self.base_transform.compose(mount.transform);
+            config.pose = world.compose(config.pose);
+            Some((mount, config.normalized()))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SensorSummary {
+    pub name: String,
+    pub sensor_type: String,
+    pub mount_transform: Transform,
+    pub world_transform: Transform,
+}
+
 /// Configured RGB camera sensor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RgbCameraSensor {

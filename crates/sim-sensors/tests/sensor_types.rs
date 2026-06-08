@@ -2,9 +2,10 @@ use sim_core::{
     Camera, Entity, Material, MaterialKind, ObjectId, PrimitiveShape, Scene, Transform, Vec3,
 };
 use sim_sensors::{
-    CameraIntrinsics, DepthFrame, DepthMetadata, FrameMetadata, FrameOutputMetadata, LidarConfig,
-    LidarFrame, LidarSensor, ObjectIdMetadata, RgbCameraSensor, RgbFrame, SegmentationFrame,
-    SensorFrame, SensorPose, scene_object_ids,
+    CameraIntrinsics, CameraSensorConfig, DepthFrame, DepthMetadata, FrameMetadata,
+    FrameOutputMetadata, LidarConfig, LidarFrame, LidarSensor, ObjectIdMetadata, RgbCameraSensor,
+    RgbFrame, SegmentationFrame, SensorConfig, SensorFrame, SensorMount, SensorPose, SensorRig,
+    scene_object_ids,
 };
 
 #[test]
@@ -151,4 +152,46 @@ fn lidar_frame_uses_zero_miss_convention() {
     assert_eq!(frame.object_ids[0], 0);
     assert_eq!(frame.ranges_m[0], 0.0);
     assert_eq!(frame.points_xyz[0], Vec3::ZERO);
+}
+
+#[test]
+fn sensor_rig_composes_mount_world_transforms_and_keeps_stable_names() {
+    let rig = SensorRig {
+        name: "front_rig".to_string(),
+        base_transform: Transform::from_translation(Vec3::new(1.0, 2.0, 3.0)),
+        mounts: vec![
+            SensorMount {
+                name: "front_camera".to_string(),
+                sensor: SensorConfig::RgbCamera(CameraSensorConfig {
+                    width: 320,
+                    height: 180,
+                    vertical_fov_degrees: 50.0,
+                }),
+                transform: Transform::from_translation(Vec3::new(0.0, 0.5, -1.0)),
+            },
+            SensorMount {
+                name: "roof_lidar".to_string(),
+                sensor: SensorConfig::Lidar(LidarConfig {
+                    horizontal_samples: 16,
+                    vertical_channels: 4,
+                    ..LidarConfig::default()
+                }),
+                transform: Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+            },
+        ],
+    };
+
+    assert_eq!(rig.sensor_names(), vec!["front_camera", "roof_lidar"]);
+    assert_eq!(
+        rig.world_transform_for_mount("front_camera")
+            .unwrap()
+            .translation,
+        Vec3::new(1.0, 2.5, 2.0)
+    );
+    assert_eq!(rig.primary_camera().unwrap().0.name, "front_camera");
+    assert_eq!(rig.primary_lidar().unwrap().0.name, "roof_lidar");
+    assert_eq!(
+        rig.primary_lidar().unwrap().1.pose.translation,
+        Vec3::new(1.0, 3.0, 3.0)
+    );
 }

@@ -28,6 +28,9 @@ Isaac Sim replacement.
   parameters.
 - `examples/datasets/randomized_boxes_lidar.json` demonstrates deterministic
   domain randomization plus LiDAR dataset export.
+- `examples/scenarios/basic_sensor_rig.json` and
+  `examples/scenarios/randomized_boxes_rig.json` demonstrate shared
+  `SensorRig` + `ScenarioConfig` startup/dataset definitions.
 - Full physics, ROS2, OpenUSD, and robot model integration are planned but not
   implemented yet.
 
@@ -43,6 +46,7 @@ apps/sensor_lab          One-frame sensor rendering CLI
 apps/dataset_generator   Simple N-frame dataset generation CLI
 apps/sim_viewer          Live sensor output viewer
 examples/scenes/         Serde JSON scene fixtures
+examples/scenarios/      Shared scene + sensor rig + dataset configs
 docs/                    Architecture, roadmap, and physics notes
 ```
 
@@ -97,6 +101,8 @@ cargo run -p sensor_lab --features rocm
 cargo run -p sensor_lab --features rocm -- --scene examples/scenes/basic_scene.json
 cargo run -p sensor_lab --features rocm -- --scene examples/scenes/boxes_scene.json
 cargo run -p sensor_lab --features rocm -- --scene examples/scenes/boxes_scene.json --lidar
+cargo run -p sensor_lab --features rocm -- --scenario examples/scenarios/basic_sensor_rig.json
+cargo run -p sensor_lab --features rocm -- --scenario examples/scenarios/basic_sensor_rig.json --lidar
 ```
 
 The ROCm path writes:
@@ -127,9 +133,11 @@ cargo run -p dataset_generator --features rocm -- --config examples/datasets/bas
 cargo run -p dataset_generator --features rocm -- --scene examples/scenes/boxes_scene.json --frames 4 --out target/boxes_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- --config examples/datasets/randomized_boxes.json --out target/randomized_boxes --overwrite
 cargo run -p dataset_generator --features rocm -- --config examples/datasets/randomized_boxes_lidar.json --out target/lidar_dataset --overwrite
+cargo run -p dataset_generator --features rocm -- --scenario examples/scenarios/basic_sensor_rig.json --out target/scenario_dataset --overwrite
 cargo run -p dataset_generator --features rocm -- validate --dataset target/sim_dataset
 cargo run -p dataset_generator --features rocm -- validate --dataset target/randomized_boxes
 cargo run -p dataset_generator --features rocm -- validate --dataset target/lidar_dataset
+cargo run -p dataset_generator --features rocm -- validate --dataset target/scenario_dataset
 ```
 
 See [Dataset generation](docs/dataset_generation.md) for config files, camera
@@ -145,6 +153,7 @@ cargo run -p sim_viewer --features rocm -- --mode depth
 cargo run -p sim_viewer --features rocm -- --mode segmentation
 cargo run -p sim_viewer --features rocm -- --scene examples/scenes/basic_scene.json
 cargo run -p sim_viewer --features rocm -- --scene examples/scenes/boxes_scene.json
+cargo run -p sim_viewer --features rocm -- --scenario examples/scenarios/basic_sensor_rig.json
 ```
 
 Finite-frame smoke runs do not open a window:
@@ -160,6 +169,8 @@ the output buffer back, the renderer returns a clear error with the failed step.
 
 - [Architecture](docs/architecture.md)
 - [Scene upload](docs/scene_upload.md)
+- [Sensor rigs](docs/sensor_rigs.md)
+- [Scenarios](docs/scenarios.md)
 - [Sensor outputs](docs/sensor_outputs.md)
 - [LiDAR sensor](docs/lidar_sensor.md)
 - [Dataset generation](docs/dataset_generation.md)

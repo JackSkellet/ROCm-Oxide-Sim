@@ -1,10 +1,10 @@
 use clap::Parser;
 use sim_core::{Camera, Scene};
 use sim_datasets::{
-    SensorImageSet, synthetic_lidar_frame, write_depth_f32, write_depth_preview_pgm,
-    write_lidar_object_ids_u32, write_lidar_points_xyz, write_lidar_preview_pgm,
-    write_lidar_range_f32, write_metadata_json, write_ppm, write_segmentation_preview_ppm,
-    write_segmentation_u32,
+    ScenarioConfig, SensorImageSet, synthetic_lidar_frame, write_depth_f32,
+    write_depth_preview_pgm, write_lidar_object_ids_u32, write_lidar_points_xyz,
+    write_lidar_preview_pgm, write_lidar_range_f32, write_metadata_json, write_ppm,
+    write_segmentation_preview_ppm, write_segmentation_u32,
 };
 use sim_render_rocm::{RocmSensorRenderer, rocm_feature_enabled};
 use sim_sensors::{
@@ -20,6 +20,8 @@ struct Args {
     #[arg(long)]
     scene: Option<PathBuf>,
     #[arg(long)]
+    scenario: Option<PathBuf>,
+    #[arg(long)]
     lidar: bool,
 }
 
@@ -28,11 +30,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_dir = PathBuf::from("target/sensor_lab");
     fs::create_dir_all(&output_dir)?;
 
-    let scene = load_scene(args.scene.as_deref())?;
-    let camera = Camera::default_rgb();
-    let sensor = RgbCameraSensor::new("rgb-main", camera);
+    let scenario = args.scenario.as_deref().map(load_scenario).transpose()?;
+    let scene_path = args.scene.as_deref().or_else(|| {
+        scenario
+            .as_ref()
+            .map(|scenario| scenario.scene_path.as_path())
+    });
+    let scene = load_scene(scene_path)?;
+    if let Some(scenario) = &scenario {
+        println!(
+            "sensor_lab: scenario={} rig={} sensors={}",
+            scenario.name,
+            scenario.rig.name,
+            scenario.rig.mounts.len()
+        );
+    }
+    let camera = scenario
+        .as_ref()
+        .and_then(|scenario| scenario.primary_camera().map(|(_mount, camera)| camera))
+        .unwrap_or_else(Camera::default_rgb);
+    let sensor_id = scenario
+        .as_ref()
+        .and_then(|scenario| {
+            scenario
+                .primary_camera()
+                .map(|(mount, _camera)| mount.name.as_str())
+        })
+        .unwrap_or("rgb-main");
+    let sensor = RgbCameraSensor::new(sensor_id, camera);
     let metadata = metadata_for_sensor_lab(sensor.id(), &scene, args.lidar);
-    let lidar_config = LidarConfig::default();
+    let lidar_config = scenario
+        .as_ref()
+        .and_then(|scenario| scenario.primary_lidar().map(|(_mount, lidar)| lidar))
+        .unwrap_or_else(LidarConfig::default);
 
     println!("sensor_lab: scene has {} entities", scene.len());
     println!(
@@ -159,6 +189,13 @@ fn load_scene(path: Option<&Path>) -> Result<Scene, Box<dyn Error>> {
     } else {
         Ok(Scene::default_sensor_scene())
     }
+}
+
+fn load_scenario(path: &Path) -> Result<ScenarioConfig, Box<dyn Error>> {
+    let json = fs::read_to_string(path)?;
+    let scenario = serde_json::from_str::<ScenarioConfig>(&json)?;
+    println!("sensor_lab: loaded scenario {}", path.display());
+    Ok(scenario)
 }
 
 fn metadata_for_sensor_lab(sensor_id: &str, scene: &Scene, include_lidar: bool) -> FrameMetadata {

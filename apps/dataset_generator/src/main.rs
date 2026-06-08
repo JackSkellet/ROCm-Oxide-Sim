@@ -2,8 +2,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use sim_core::Scene;
 use sim_datasets::{
     CameraPathConfig, DatasetConfig, DatasetFrameMetadata, DatasetWriter, LidarFrameMetadata,
-    SensorImageSet, camera_for_dataset_frame, frame_output_paths_for_config,
-    randomize_camera_for_frame, randomize_scene_for_frame, validate_dataset,
+    ScenarioConfig, ScenarioFrameMetadata, SensorImageSet, camera_for_dataset_frame,
+    frame_output_paths_for_config, randomize_camera_for_frame, randomize_scene_for_frame,
+    validate_dataset,
 };
 #[cfg(feature = "rocm")]
 use sim_render_rocm::RocmSensorRenderer;
@@ -21,6 +22,8 @@ struct Args {
     command: Option<Command>,
     #[arg(long)]
     config: Option<PathBuf>,
+    #[arg(long)]
+    scenario: Option<PathBuf>,
     #[arg(long)]
     scene: Option<PathBuf>,
     #[arg(short = 'n', long)]
@@ -89,7 +92,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_generate(args: Args) -> Result<(), Box<dyn Error>> {
-    let (config, config_path) = resolve_config(&args)?;
+    let resolved = resolve_config(&args)?;
+    let config = resolved.config;
     if args.dry_run {
         print_dry_run(&config)?;
         return Ok(());
@@ -121,12 +125,32 @@ fn run_generate(args: Args) -> Result<(), Box<dyn Error>> {
         &config.output_dir,
         config.clone(),
         config.scene_path.as_ref().map(path_to_string),
-        config_path.as_ref().map(path_to_string),
+        resolved
+            .scenario_path
+            .as_ref()
+            .or(resolved.config_path.as_ref())
+            .map(path_to_string),
         render_session.backend_label(),
         object_ids.clone(),
     )?;
+    if let Some(scenario) = &resolved.scenario {
+        writer.set_scenario(scenario.manifest_metadata());
+        println!(
+            "dataset_generator: scenario={} rig={} sensors={}",
+            scenario.name,
+            scenario.rig.name,
+            scenario.rig.mounts.len()
+        );
+    }
 
-    render_dataset(&config, &scene, &object_ids, &render_session, &mut writer)?;
+    render_dataset(
+        &config,
+        &scene,
+        resolved.scenario.as_ref(),
+        &object_ids,
+        &render_session,
+        &mut writer,
+    )?;
 
     let manifest = writer.finish()?;
     println!(
@@ -137,17 +161,39 @@ fn run_generate(args: Args) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn resolve_config(args: &Args) -> Result<(DatasetConfig, Option<PathBuf>), Box<dyn Error>> {
+struct ResolvedConfig {
+    config: DatasetConfig,
+    config_path: Option<PathBuf>,
+    scenario: Option<ScenarioConfig>,
+    scenario_path: Option<PathBuf>,
+}
+
+fn resolve_config(args: &Args) -> Result<ResolvedConfig, Box<dyn Error>> {
+    if args.config.is_some() && args.scenario.is_some() {
+        return Err("--config and --scenario cannot be used together".into());
+    }
+
+    let mut scenario = if let Some(path) = &args.scenario {
+        Some(load_scenario(path)?)
+    } else {
+        None
+    };
+
     let mut config = if let Some(path) = &args.config {
         let json = fs::read_to_string(path)?;
         serde_json::from_str::<DatasetConfig>(&json)
             .map_err(|err| format!("failed to parse dataset config {}: {err}", path.display()))?
+    } else if let Some(scenario) = &scenario {
+        scenario.dataset_config()
     } else {
         DatasetConfig::default()
     };
 
     if let Some(scene) = &args.scene {
         config.scene_path = Some(scene.clone());
+        if let Some(scenario) = &mut scenario {
+            scenario.scene_path = scene.clone();
+        }
     }
     if let Some(out) = &args.out {
         config.output_dir = out.clone();
@@ -171,7 +217,20 @@ fn resolve_config(args: &Args) -> Result<(DatasetConfig, Option<PathBuf>), Box<d
         config.domain_randomization.enabled = true;
     }
 
-    Ok((config.normalized(), args.config.clone()))
+    Ok(ResolvedConfig {
+        config: config.normalized(),
+        config_path: args.config.clone(),
+        scenario,
+        scenario_path: args.scenario.clone(),
+    })
+}
+
+fn load_scenario(path: &Path) -> Result<ScenarioConfig, Box<dyn Error>> {
+    let json = fs::read_to_string(path)?;
+    let scenario = serde_json::from_str::<ScenarioConfig>(&json)
+        .map_err(|err| format!("failed to parse scenario {}: {err}", path.display()))?;
+    println!("dataset_generator: loaded scenario {}", path.display());
+    Ok(scenario)
 }
 
 fn prepare_output_dir(output_dir: &Path, overwrite: bool) -> Result<(), Box<dyn Error>> {
@@ -236,20 +295,26 @@ fn load_scene(path: Option<&Path>) -> Result<Scene, Box<dyn Error>> {
 fn render_dataset(
     config: &DatasetConfig,
     base_scene: &Scene,
+    scenario: Option<&ScenarioConfig>,
     object_ids: &[sim_sensors::ObjectIdMetadata],
     render_session: &RenderSession,
     writer: &mut DatasetWriter,
 ) -> Result<(), Box<dyn Error>> {
     for frame_index in 1..=config.frame_count {
         let timestamp_seconds = (frame_index - 1) as f64 / 30.0;
-        let mut camera = camera_for_dataset_frame(
-            &config.camera_path,
-            frame_index,
-            config.frame_count,
-            config.width,
-            config.height,
-            config.seed,
-        );
+        let mut camera = scenario
+            .and_then(|scenario| scenario.primary_camera().map(|(_mount, camera)| camera))
+            .unwrap_or_else(|| {
+                camera_for_dataset_frame(
+                    &config.camera_path,
+                    frame_index,
+                    config.frame_count,
+                    config.width,
+                    config.height,
+                    config.seed,
+                )
+            })
+            .with_resolution(config.width, config.height);
         camera = randomize_camera_for_frame(
             camera,
             &config.domain_randomization,
@@ -268,11 +333,18 @@ fn render_dataset(
             base_scene
         };
         let sensor = RgbCameraSensor::new("rgb-main", camera);
+        let sensor_id = scenario
+            .and_then(|scenario| {
+                scenario
+                    .primary_camera()
+                    .map(|(mount, _camera)| mount.name.as_str())
+            })
+            .unwrap_or(sensor.id());
         let paths = frame_output_paths_for_config(frame_index as u64, config);
         let mut metadata = DatasetFrameMetadata::new(
             frame_index as u64,
             timestamp_seconds,
-            sensor.id(),
+            sensor_id,
             config.seed,
             &config.camera_path,
             sensor.camera(),
@@ -281,6 +353,9 @@ fn render_dataset(
             object_ids.to_vec(),
             Some(render_session.backend_label()),
         );
+        if let Some(scenario) = scenario {
+            metadata = metadata.with_scenario(ScenarioFrameMetadata::from_scenario(scenario));
+        }
         if config.lidar.enabled {
             metadata = metadata.with_lidar(LidarFrameMetadata::new(config.lidar, &paths));
         }
@@ -291,7 +366,7 @@ fn render_dataset(
         let rendered = render_session.render_frame(
             render_scene,
             &sensor,
-            config.lidar.enabled.then(|| config.lidar.to_lidar_config()),
+            lidar_config_for_frame(config, scenario),
             frame_index as u64,
         )?;
         writer.write_dataset_outputs(
@@ -303,6 +378,18 @@ fn render_dataset(
     }
 
     Ok(())
+}
+
+fn lidar_config_for_frame(
+    config: &DatasetConfig,
+    scenario: Option<&ScenarioConfig>,
+) -> Option<sim_sensors::LidarConfig> {
+    if !config.lidar.enabled {
+        return None;
+    }
+    scenario
+        .and_then(|scenario| scenario.primary_lidar().map(|(_mount, lidar)| lidar))
+        .or_else(|| Some(config.lidar.to_lidar_config()))
 }
 
 enum RenderSession {
@@ -476,5 +563,22 @@ mod tests {
             validate.command,
             Some(Command::Validate(ValidateArgs { .. }))
         ));
+
+        let scenario = Args::try_parse_from([
+            "dataset_generator",
+            "--scenario",
+            "examples/scenarios/basic_sensor_rig.json",
+            "--out",
+            "target/scenario_dataset",
+            "--overwrite",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            scenario.scenario.as_deref(),
+            Some(std::path::Path::new(
+                "examples/scenarios/basic_sensor_rig.json"
+            ))
+        );
     }
 }

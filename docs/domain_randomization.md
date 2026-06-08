@@ -25,6 +25,16 @@ cargo run -p dataset_generator --features rocm -- \
   --overwrite
 ```
 
+The scenario variant combines the same randomization block with a reusable
+sensor rig:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --scenario examples/scenarios/randomized_boxes_rig.json \
+  --out target/scenario_randomized_dataset \
+  --overwrite
+```
+
 Two runs with the same config and seed should be byte-identical:
 
 ```bash

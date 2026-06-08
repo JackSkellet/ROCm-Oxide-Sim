@@ -19,6 +19,21 @@ fn transform_applies_scale_rotation_and_translation() {
 }
 
 #[test]
+fn transform_composes_parent_and_child_for_sensor_mounts() {
+    let parent = Transform {
+        translation: Vec3::new(10.0, 2.0, -3.0),
+        rotation: EulerRotation::IDENTITY,
+        scale: Vec3::new(2.0, 1.0, 0.5),
+    };
+    let child = Transform::from_translation(Vec3::new(1.0, 3.0, 4.0));
+
+    let world = parent.compose(child);
+
+    assert_eq!(world.translation, Vec3::new(12.0, 5.0, -1.0));
+    assert_eq!(world.scale, Vec3::new(2.0, 1.0, 0.5));
+}
+
+#[test]
 fn camera_from_look_at_points_toward_target() {
     let camera = Camera::look_at(
         Vec3::new(0.0, 1.0, 5.0),

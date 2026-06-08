@@ -3,7 +3,8 @@
 Milestone 1 defined three image-like sensor outputs. Later milestones keep the
 same contracts while sourcing hits from uploaded `sim-core::Scene` geometry.
 Milestone 6A adds a single-return LiDAR/raycast output using the same uploaded
-scene buffers.
+scene buffers. Milestone 6B lets those sensors be mounted on a shared
+`SensorRig` and loaded through `ScenarioConfig`.
 
 ## RGB
 
@@ -114,3 +115,6 @@ rolling scan timing are not implemented yet.
 Dataset metadata records the active scene object ID map for every generated
 frame and repeats the depth/segmentation conventions in `dataset_manifest.json`
 for reproducible downstream parsing.
+
+Scenario datasets also record rig name, stable sensor mount names, mount
+transforms, and world sensor transforms in the manifest and per-frame metadata.

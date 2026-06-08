@@ -1,0 +1,93 @@
+{
+  "name": "basic_sensor_rig",
+  "scene_path": "examples/scenes/boxes_scene.json",
+  "rig": {
+    "name": "front_rig",
+    "base_transform": {
+      "translation": {
+        "x": 0.0,
+        "y": 1.1,
+        "z": 4.5
+      },
+      "rotation": {
+        "roll": 0.0,
+        "pitch": 0.0,
+        "yaw": 0.0
+      },
+      "scale": {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 1.0
+      }
+    },
+    "mounts": [
+      {
+        "name": "front_camera",
+        "sensor": {
+          "type": "rgb_camera",
+          "width": 640,
+          "height": 360,
+          "vertical_fov_degrees": 55.0
+        },
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "rotation": {
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        }
+      },
+      {
+        "name": "roof_lidar",
+        "sensor": {
+          "type": "lidar",
+          "horizontal_samples": 512,
+          "vertical_channels": 32,
+          "horizontal_fov_degrees": 360.0,
+          "vertical_fov_degrees": 30.0,
+          "min_range_m": 0.1,
+          "max_range_m": 50.0
+        },
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.35,
+            "z": 0.0
+          },
+          "rotation": {
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        }
+      }
+    ]
+  },
+  "dataset": {
+    "frame_count": 4,
+    "seed": 20260608,
+    "outputs": {
+      "rgb": true,
+      "depth": true,
+      "depth_preview": true,
+      "segmentation": true,
+      "segmentation_preview": true,
+      "metadata": true
+    }
+  }
+}

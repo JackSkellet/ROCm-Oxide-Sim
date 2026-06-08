@@ -34,6 +34,13 @@ Defaults:
 identity pose
 ```
 
+In scenario files, a LiDAR config is mounted on a `SensorRig`. The mounted
+world pose is:
+
+```text
+rig.base_transform.compose(mount.transform).compose(lidar.pose)
+```
+
 ## Output Contract
 
 Each ray produces one return:
@@ -89,5 +96,5 @@ the LiDAR output paths and the same miss convention.
 - No rolling scan timing or motion distortion.
 - No multi-echo returns.
 - No meshes or BVH.
-- No robot-relative sensor rig abstraction yet.
+- No robot-relative articulated rig semantics yet.
 - No physics, ROS2, URDF, or OpenUSD integration.

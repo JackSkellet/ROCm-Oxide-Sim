@@ -2,9 +2,9 @@ use sim_core::{Camera, Entity, Material, ObjectId, PrimitiveShape, Scene, Transf
 use sim_datasets::{
     CameraPathConfig, DatasetConfig, DatasetLidarConfig, DatasetManifest, DatasetWriter,
     DepthImage, DomainRandomizationConfig, LidarFrameMetadata, ObjectTransformRandomization,
-    OutputSelection, RgbImage, SegmentationImage, SensorImageSet, ValidationError,
-    camera_for_dataset_frame, depth_preview_pixels, frame_output_paths,
-    frame_output_paths_for_config, frame_output_paths_for_selection_and_lidar,
+    OutputSelection, RgbImage, ScenarioConfig, ScenarioFrameMetadata, SegmentationImage,
+    SensorImageSet, ValidationError, camera_for_dataset_frame, depth_preview_pixels,
+    frame_output_paths, frame_output_paths_for_config, frame_output_paths_for_selection_and_lidar,
     lidar_range_preview_pixels, randomize_camera_for_frame, randomize_scene_for_frame,
     segmentation_color, validate_dataset,
 };
@@ -184,6 +184,88 @@ fn dataset_config_parses_lidar_settings() {
 }
 
 #[test]
+fn scenario_config_parses_scene_path_and_sensor_rig() {
+    let json = r#"{
+      "name": "basic_sensor_rig",
+      "scene_path": "examples/scenes/boxes_scene.json",
+      "rig": {
+        "name": "front_rig",
+        "base_transform": {
+          "translation": { "x": 0.0, "y": 1.1, "z": 4.5 },
+          "rotation": { "roll": 0.0, "pitch": 0.0, "yaw": 0.0 },
+          "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        },
+        "mounts": [
+          {
+            "name": "front_camera",
+            "sensor": {
+              "type": "rgb_camera",
+              "width": 320,
+              "height": 180,
+              "vertical_fov_degrees": 55.0
+            },
+            "transform": {
+              "translation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+              "rotation": { "roll": 0.0, "pitch": 0.0, "yaw": 0.0 },
+              "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            }
+          },
+          {
+            "name": "roof_lidar",
+            "sensor": {
+              "type": "lidar",
+              "horizontal_samples": 32,
+              "vertical_channels": 4,
+              "horizontal_fov_degrees": 360.0,
+              "vertical_fov_degrees": 30.0,
+              "min_range_m": 0.1,
+              "max_range_m": 50.0
+            },
+            "transform": {
+              "translation": { "x": 0.0, "y": 0.5, "z": 0.0 },
+              "rotation": { "roll": 0.0, "pitch": 0.0, "yaw": 0.0 },
+              "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            }
+          }
+        ]
+      },
+      "dataset": {
+        "frame_count": 2,
+        "seed": 99,
+        "outputs": {
+          "rgb": true,
+          "depth": true,
+          "depth_preview": true,
+          "segmentation": true,
+          "segmentation_preview": true,
+          "metadata": true
+        }
+      }
+    }"#;
+
+    let scenario: ScenarioConfig = serde_json::from_str(json).unwrap();
+    let dataset = scenario.dataset_config();
+
+    assert_eq!(scenario.name, "basic_sensor_rig");
+    assert_eq!(
+        scenario.scene_path.as_path(),
+        std::path::Path::new("examples/scenes/boxes_scene.json")
+    );
+    assert_eq!(
+        scenario.rig.sensor_names(),
+        vec!["front_camera", "roof_lidar"]
+    );
+    assert_eq!(
+        dataset.scene_path.as_deref(),
+        Some(scenario.scene_path.as_path())
+    );
+    assert_eq!(dataset.width, 320);
+    assert_eq!(dataset.height, 180);
+    assert!(dataset.lidar.enabled);
+    assert_eq!(dataset.lidar.horizontal_samples, 32);
+}
+
+#[test]
 fn random_camera_path_is_reproducible_for_seed() {
     let config = CameraPathConfig::random_default();
 
@@ -285,6 +367,69 @@ fn manifest_includes_lidar_config_when_enabled() {
         manifest.frames[0].lidar_range.as_deref(),
         Some("lidar_range/frame_000001.f32")
     );
+}
+
+#[test]
+fn manifest_and_validation_accept_scenario_metadata() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let scenario_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/scenarios/basic_sensor_rig.json");
+    let scenario: ScenarioConfig =
+        serde_json::from_str(&std::fs::read_to_string(scenario_path).unwrap()).unwrap();
+    let config = scenario.dataset_config();
+    let mut writer = DatasetWriter::new_with_config(
+        temp_dir.path(),
+        config.clone(),
+        Some("examples/scenes/boxes_scene.json".to_string()),
+        Some("examples/scenarios/basic_sensor_rig.json".to_string()),
+        "cpu-preview".to_string(),
+        vec![ObjectIdMetadata::new(0, "background")],
+    )
+    .unwrap();
+    writer.set_scenario(scenario.manifest_metadata());
+
+    let camera = scenario.primary_camera().unwrap().1;
+    let paths = frame_output_paths_for_config(1, &config);
+    let metadata = sim_datasets::DatasetFrameMetadata::new(
+        1,
+        0.0,
+        "front_camera",
+        config.seed,
+        &config.camera_path,
+        &camera,
+        &paths,
+        Some("examples/scenes/boxes_scene.json".to_string()),
+        vec![ObjectIdMetadata::new(0, "background")],
+        Some("cpu-preview".to_string()),
+    )
+    .with_scenario(ScenarioFrameMetadata::from_scenario(&scenario))
+    .with_lidar(LidarFrameMetadata::new(config.lidar, &paths));
+    let images = SensorImageSet {
+        rgb: RgbImage::new(2, 1, vec![0, 0]).unwrap(),
+        depth: DepthImage::new(2, 1, vec![0.0, 1.0]).unwrap(),
+        segmentation: SegmentationImage::new(2, 1, vec![0, 1]).unwrap(),
+    };
+    let sample_count = config.lidar.to_lidar_config().sample_count();
+    let lidar = LidarFrame::new(
+        config.lidar.horizontal_samples,
+        config.lidar.vertical_channels,
+        FrameMetadata::new(1, 0.0, "roof_lidar"),
+        vec![0.0; sample_count],
+        vec![Vec3::ZERO; sample_count],
+        vec![0; sample_count],
+    );
+
+    writer
+        .write_dataset_outputs(1, &images, Some(&lidar), &metadata)
+        .unwrap();
+    let manifest = writer.finish().unwrap();
+
+    assert_eq!(manifest.scenario.as_ref().unwrap().name, scenario.name);
+    assert_eq!(
+        manifest.scenario.as_ref().unwrap().sensors[0].name,
+        "front_camera"
+    );
+    assert_eq!(validate_dataset(temp_dir.path()).unwrap().frame_count, 1);
 }
 
 #[test]
@@ -550,6 +695,25 @@ fn randomized_boxes_lidar_config_parses() {
     assert!(config.lidar.enabled);
     assert_eq!(config.lidar.horizontal_samples, 512);
     assert_eq!(config.lidar.vertical_channels, 32);
+}
+
+#[test]
+fn scenario_example_files_parse() {
+    for file_name in ["basic_sensor_rig.json", "randomized_boxes_rig.json"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/scenarios")
+            .join(file_name);
+        let scenario: ScenarioConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap())
+                .expect("scenario config should parse");
+
+        assert!(scenario.primary_camera().is_some());
+        assert!(scenario.primary_lidar().is_some());
+        assert_eq!(
+            scenario.scene_path.as_path(),
+            std::path::Path::new("examples/scenes/boxes_scene.json")
+        );
+    }
 }
 
 #[test]

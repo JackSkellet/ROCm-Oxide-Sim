@@ -201,6 +201,18 @@ impl Transform {
     pub fn transform_direction(self, direction: Vec3) -> Vec3 {
         self.rotation.rotate_vector(direction).normalized()
     }
+
+    pub fn compose(self, child: Self) -> Self {
+        Self {
+            translation: self.transform_point(child.translation),
+            rotation: EulerRotation::new(
+                self.rotation.roll + child.rotation.roll,
+                self.rotation.pitch + child.rotation.pitch,
+                self.rotation.yaw + child.rotation.yaw,
+            ),
+            scale: self.scale.component_mul(child.scale),
+        }
+    }
 }
 
 impl Default for Transform {

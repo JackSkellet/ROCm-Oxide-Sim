@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sim_core::{Camera, MaterialKind, PrimitiveShape, Scene, Transform, Vec3};
 use sim_sensors::{
     CameraIntrinsics, DepthFrame, FrameMetadata, FrameOutputMetadata, LidarConfig, LidarFrame,
-    ObjectIdMetadata, RgbFrame, SegmentationFrame,
+    ObjectIdMetadata, RgbFrame, SegmentationFrame, SensorRig, SensorSummary,
 };
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -190,6 +190,20 @@ impl DatasetLidarConfig {
             pose: self.pose,
         }
         .normalized()
+    }
+
+    pub fn from_lidar_config(config: LidarConfig) -> Self {
+        let config = config.normalized();
+        Self {
+            enabled: true,
+            horizontal_samples: config.horizontal_samples,
+            vertical_channels: config.vertical_channels,
+            horizontal_fov_degrees: config.horizontal_fov_degrees,
+            vertical_fov_degrees: config.vertical_fov_degrees,
+            min_range_m: config.min_range_m,
+            max_range_m: config.max_range_m,
+            pose: config.pose,
+        }
     }
 }
 
@@ -524,6 +538,54 @@ impl DatasetConfig {
         self.outputs = self.outputs.normalized();
         self.lidar = self.lidar.normalized();
         self
+    }
+}
+
+/// A reusable scene + sensor-rig + dataset job description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenarioConfig {
+    pub name: String,
+    pub scene_path: PathBuf,
+    pub rig: SensorRig,
+    #[serde(default)]
+    pub dataset: DatasetConfig,
+}
+
+impl ScenarioConfig {
+    pub fn normalized(mut self) -> Self {
+        self.dataset = self.dataset_config();
+        self
+    }
+
+    pub fn dataset_config(&self) -> DatasetConfig {
+        let mut dataset = self.dataset.clone().normalized();
+        dataset.scene_path = Some(self.scene_path.clone());
+        if let Some((_mount, camera)) = self.rig.primary_camera() {
+            dataset.width = camera.width;
+            dataset.height = camera.height;
+        }
+        if let Some((_mount, lidar)) = self.rig.primary_lidar() {
+            dataset.lidar = DatasetLidarConfig::from_lidar_config(lidar);
+        }
+        dataset.normalized()
+    }
+
+    pub fn primary_camera(&self) -> Option<(&sim_sensors::SensorMount, Camera)> {
+        self.rig.primary_camera()
+    }
+
+    pub fn primary_lidar(&self) -> Option<(&sim_sensors::SensorMount, LidarConfig)> {
+        self.rig.primary_lidar()
+    }
+
+    pub fn manifest_metadata(&self) -> ScenarioManifestMetadata {
+        ScenarioManifestMetadata {
+            name: self.name.clone(),
+            scene_path: self.scene_path.display().to_string(),
+            rig_name: self.rig.name.clone(),
+            rig_base_transform: self.rig.base_transform,
+            sensors: self.rig.sensor_summary(),
+        }
     }
 }
 
@@ -1124,6 +1186,34 @@ impl CameraFrameMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenarioFrameMetadata {
+    pub name: String,
+    pub rig_name: String,
+    pub rig_base_transform: Transform,
+    pub sensors: Vec<SensorSummary>,
+}
+
+impl ScenarioFrameMetadata {
+    pub fn from_scenario(scenario: &ScenarioConfig) -> Self {
+        Self {
+            name: scenario.name.clone(),
+            rig_name: scenario.rig.name.clone(),
+            rig_base_transform: scenario.rig.base_transform,
+            sensors: scenario.rig.sensor_summary(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenarioManifestMetadata {
+    pub name: String,
+    pub scene_path: String,
+    pub rig_name: String,
+    pub rig_base_transform: Transform,
+    pub sensors: Vec<SensorSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetFrameMetadata {
     pub frame_index: u64,
     pub timestamp_seconds: f64,
@@ -1143,6 +1233,8 @@ pub struct DatasetFrameMetadata {
     pub segmentation_convention: SegmentationConventionMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lidar: Option<LidarFrameMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<ScenarioFrameMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_randomization: Option<DomainRandomizationFrameMetadata>,
 }
@@ -1176,6 +1268,7 @@ impl DatasetFrameMetadata {
             depth_convention: DepthConventionMetadata::linear_ray_distance_meters(),
             segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
             lidar: None,
+            scenario: None,
             domain_randomization: None,
         }
     }
@@ -1187,6 +1280,11 @@ impl DatasetFrameMetadata {
 
     pub fn with_lidar(mut self, lidar: LidarFrameMetadata) -> Self {
         self.lidar = Some(lidar);
+        self
+    }
+
+    pub fn with_scenario(mut self, scenario: ScenarioFrameMetadata) -> Self {
+        self.scenario = Some(scenario);
         self
     }
 }
@@ -1459,6 +1557,8 @@ pub struct DatasetManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lidar_convention: Option<LidarConventionMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<ScenarioManifestMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_randomization: Option<DomainRandomizationConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renderer_backend: Option<String>,
@@ -1490,6 +1590,7 @@ impl DatasetManifest {
             segmentation_convention: SegmentationConventionMetadata::object_ids_u32(),
             lidar: DatasetLidarConfig::default(),
             lidar_convention: None,
+            scenario: None,
             domain_randomization: None,
             renderer_backend: None,
         }
@@ -1534,6 +1635,11 @@ impl DatasetManifest {
             .then(LidarConventionMetadata::single_return_linear_range);
         self
     }
+
+    pub fn with_scenario(mut self, scenario: Option<ScenarioManifestMetadata>) -> Self {
+        self.scenario = scenario;
+        self
+    }
 }
 
 /// Writer for the initial RGB + metadata dataset layout.
@@ -1546,6 +1652,7 @@ pub struct DatasetWriter {
     renderer_backend: String,
     object_ids: Vec<ObjectIdMetadata>,
     frames: Vec<ManifestFrame>,
+    scenario: Option<ScenarioManifestMetadata>,
 }
 
 impl DatasetWriter {
@@ -1600,7 +1707,12 @@ impl DatasetWriter {
             renderer_backend,
             object_ids,
             frames: Vec::new(),
+            scenario: None,
         })
+    }
+
+    pub fn set_scenario(&mut self, scenario: ScenarioManifestMetadata) {
+        self.scenario = Some(scenario);
     }
 
     pub fn write_rgb_frame(
@@ -1703,6 +1815,7 @@ impl DatasetWriter {
         .with_object_ids(self.object_ids.clone())
         .with_frames(self.frames.clone())
         .with_lidar(self.config.lidar)
+        .with_scenario(self.scenario.clone())
         .with_domain_randomization(self.config.domain_randomization.clone());
         manifest.renderer_backend = Some(self.renderer_backend.clone());
         let path = self.root.join("dataset_manifest.json");
@@ -1979,6 +2092,14 @@ pub fn validate_dataset(
         .as_ref()
         .is_some_and(|config| config.enabled);
     let lidar_enabled = manifest.lidar.enabled;
+    let scenario_enabled = manifest.scenario.is_some();
+    if let Some(scenario) = &manifest.scenario
+        && scenario.sensors.is_empty()
+    {
+        return Err(ValidationError::InvalidManifest(
+            "scenario sensor list is empty".to_string(),
+        ));
+    }
 
     for frame in &manifest.frames {
         check_optional_file(root, frame.rgb.as_deref())?;
@@ -2107,6 +2228,28 @@ pub fn validate_dataset(
                 return Err(ValidationError::InvalidMetadata {
                     path: frame.metadata.clone(),
                     message: "lidar convention must use object ID 0 for misses".to_string(),
+                });
+            }
+        }
+        if scenario_enabled {
+            let scenario =
+                metadata
+                    .get("scenario")
+                    .ok_or_else(|| ValidationError::InvalidMetadata {
+                        path: frame.metadata.clone(),
+                        message: "missing scenario section".to_string(),
+                    })?;
+            let sensors = scenario
+                .get("sensors")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "missing scenario.sensors array".to_string(),
+                })?;
+            if sensors.is_empty() {
+                return Err(ValidationError::InvalidMetadata {
+                    path: frame.metadata.clone(),
+                    message: "scenario.sensors array is empty".to_string(),
                 });
             }
         }

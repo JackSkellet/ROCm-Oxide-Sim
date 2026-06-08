@@ -2,7 +2,7 @@ use clap::{Parser, ValueEnum};
 use pixels::{Pixels, SurfaceTexture};
 use sim_core::{Camera, Scene, Vec3};
 use sim_datasets::{
-    DepthImage, RgbImage, SegmentationImage, SensorImageSet, depth_preview_pixels,
+    DepthImage, RgbImage, ScenarioConfig, SegmentationImage, SensorImageSet, depth_preview_pixels,
     segmentation_color,
 };
 use sim_render_rocm::{RocmSensorRenderer, rocm_feature_enabled};
@@ -31,6 +31,8 @@ struct Args {
     camera: CameraMode,
     #[arg(long)]
     scene: Option<std::path::PathBuf>,
+    #[arg(long)]
+    scenario: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -71,8 +73,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("viewer width and height must be nonzero".into());
     }
 
-    let scene = load_scene(args.scene.as_deref())?;
+    let scenario = args.scenario.as_deref().map(load_scenario).transpose()?;
+    let scene_path = args.scene.as_deref().or_else(|| {
+        scenario
+            .as_ref()
+            .map(|scenario| scenario.scene_path.as_path())
+    });
+    let scene = load_scene(scene_path)?;
+    let initial_camera = scenario
+        .as_ref()
+        .and_then(|scenario| scenario.primary_camera().map(|(_mount, camera)| camera))
+        .unwrap_or_else(Camera::default_rgb)
+        .with_resolution(args.width, args.height);
     let renderer = open_renderer()?;
+    if let Some(scenario) = &scenario {
+        println!(
+            "sim_viewer: scenario={} rig={} sensors={}",
+            scenario.name,
+            scenario.rig.name,
+            scenario.rig.mounts.len()
+        );
+    }
 
     println!(
         "sim_viewer: {}x{} mode={} camera={}",
@@ -82,10 +103,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("sim_viewer: presentation path is ROCm render -> host copy -> pixels/winit upload");
 
     if let Some(frames) = args.frames {
-        return run_headless_frames(&args, &scene, renderer.as_ref(), frames);
+        return run_headless_frames(&args, &scene, renderer.as_ref(), frames, initial_camera);
     }
 
-    run_windowed(args, scene, renderer)
+    run_windowed(args, scene, renderer, initial_camera)
 }
 
 fn load_scene(path: Option<&std::path::Path>) -> Result<Scene, Box<dyn Error>> {
@@ -97,6 +118,13 @@ fn load_scene(path: Option<&std::path::Path>) -> Result<Scene, Box<dyn Error>> {
     } else {
         Ok(Scene::default_sensor_scene())
     }
+}
+
+fn load_scenario(path: &std::path::Path) -> Result<ScenarioConfig, Box<dyn Error>> {
+    let json = std::fs::read_to_string(path)?;
+    let scenario = serde_json::from_str::<ScenarioConfig>(&json)?;
+    println!("sim_viewer: loaded scenario {}", path.display());
+    Ok(scenario)
 }
 
 fn open_renderer() -> Result<Option<RocmSensorRenderer>, Box<dyn Error>> {
@@ -122,12 +150,19 @@ fn run_headless_frames(
     scene: &Scene,
     renderer: Option<&RocmSensorRenderer>,
     frames: u64,
+    initial_camera: Camera,
 ) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     let mut rgba_len = 0usize;
 
     for frame_index in 1..=frames {
-        let camera = camera_for_mode(args.camera, args.width, args.height, frame_index);
+        let camera = camera_for_mode(
+            args.camera,
+            args.width,
+            args.height,
+            frame_index,
+            initial_camera,
+        );
         let images = render_images(scene, renderer, camera, frame_index)?;
         let rgba = rgba_for_mode(args.mode, &images);
         rgba_len = rgba.len();
@@ -155,6 +190,7 @@ fn run_windowed(
     args: Args,
     scene: Scene,
     renderer: Option<RocmSensorRenderer>,
+    initial_camera: Camera,
 ) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -167,7 +203,13 @@ fn run_windowed(
     println!("sim_viewer: controls: 1 RGB, 2 depth, 3 segmentation, R reset, Esc quit");
     println!("sim_viewer: controls: W/S forward/back, A/D strafe, arrows look, Shift faster");
 
-    let mut state = ViewerState::new(args.mode, args.camera, args.width, args.height);
+    let mut state = ViewerState::new(
+        args.mode,
+        args.camera,
+        args.width,
+        args.height,
+        initial_camera,
+    );
     let mut pressed = HashSet::new();
     let mut last_report = Instant::now();
     let mut frames_since_report = 0u64;
@@ -269,6 +311,7 @@ struct ViewerState {
     camera_mode: CameraMode,
     width: u32,
     height: u32,
+    initial_camera: Camera,
     frame_index: u64,
     position: Vec3,
     yaw: f32,
@@ -276,12 +319,19 @@ struct ViewerState {
 }
 
 impl ViewerState {
-    fn new(mode: ViewMode, camera_mode: CameraMode, width: u32, height: u32) -> Self {
+    fn new(
+        mode: ViewMode,
+        camera_mode: CameraMode,
+        width: u32,
+        height: u32,
+        initial_camera: Camera,
+    ) -> Self {
         let mut state = Self {
             mode,
             camera_mode,
             width,
             height,
+            initial_camera,
             frame_index: 0,
             position: Vec3::ZERO,
             yaw: 0.0,
@@ -292,7 +342,7 @@ impl ViewerState {
     }
 
     fn reset_camera(&mut self) {
-        let camera = Camera::default_rgb().with_resolution(self.width, self.height);
+        let camera = self.initial_camera.with_resolution(self.width, self.height);
         self.position = camera.position;
         self.yaw = camera.forward.x.atan2(-camera.forward.z);
         self.pitch = camera.forward.y.asin();
@@ -354,17 +404,27 @@ impl ViewerState {
                 Camera::look_at(self.position, self.position + forward, 55.0, aspect)
                     .with_resolution(self.width, self.height)
             }
-            CameraMode::Orbit => {
-                camera_for_mode(self.camera_mode, self.width, self.height, self.frame_index)
-            }
+            CameraMode::Orbit => camera_for_mode(
+                self.camera_mode,
+                self.width,
+                self.height,
+                self.frame_index,
+                self.initial_camera,
+            ),
         }
     }
 }
 
-fn camera_for_mode(mode: CameraMode, width: u32, height: u32, frame_index: u64) -> Camera {
+fn camera_for_mode(
+    mode: CameraMode,
+    width: u32,
+    height: u32,
+    frame_index: u64,
+    initial_camera: Camera,
+) -> Camera {
     let aspect = width as f32 / height as f32;
     match mode {
-        CameraMode::Static => Camera::default_rgb().with_resolution(width, height),
+        CameraMode::Static => initial_camera.with_resolution(width, height),
         CameraMode::Orbit => {
             let t = frame_index as f32 * 0.035;
             let target = Vec3::new(0.0, 0.55, -1.45);
@@ -470,6 +530,8 @@ mod tests {
             "4",
             "--camera",
             "orbit",
+            "--scenario",
+            "examples/scenarios/basic_sensor_rig.json",
         ])
         .unwrap();
 
@@ -478,6 +540,12 @@ mod tests {
         assert_eq!(args.mode, ViewMode::Segmentation);
         assert_eq!(args.frames, Some(4));
         assert_eq!(args.camera, CameraMode::Orbit);
+        assert_eq!(
+            args.scenario.as_deref(),
+            Some(std::path::Path::new(
+                "examples/scenarios/basic_sensor_rig.json"
+            ))
+        );
     }
 
     #[test]

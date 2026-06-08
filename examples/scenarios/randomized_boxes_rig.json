@@ -1,0 +1,143 @@
+{
+  "name": "randomized_boxes_rig",
+  "scene_path": "examples/scenes/boxes_scene.json",
+  "rig": {
+    "name": "front_rig",
+    "base_transform": {
+      "translation": {
+        "x": 0.0,
+        "y": 1.1,
+        "z": 4.5
+      },
+      "rotation": {
+        "roll": 0.0,
+        "pitch": 0.0,
+        "yaw": 0.0
+      },
+      "scale": {
+        "x": 1.0,
+        "y": 1.0,
+        "z": 1.0
+      }
+    },
+    "mounts": [
+      {
+        "name": "front_camera",
+        "sensor": {
+          "type": "rgb_camera",
+          "width": 960,
+          "height": 540,
+          "vertical_fov_degrees": 46.0
+        },
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "rotation": {
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        }
+      },
+      {
+        "name": "roof_lidar",
+        "sensor": {
+          "type": "lidar",
+          "horizontal_samples": 512,
+          "vertical_channels": 32,
+          "horizontal_fov_degrees": 360.0,
+          "vertical_fov_degrees": 30.0,
+          "min_range_m": 0.1,
+          "max_range_m": 50.0
+        },
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.35,
+            "z": 0.0
+          },
+          "rotation": {
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        }
+      }
+    ]
+  },
+  "dataset": {
+    "frame_count": 8,
+    "seed": 1234,
+    "domain_randomization": {
+      "enabled": true,
+      "per_frame": true,
+      "object_transforms": {
+        "enabled": true,
+        "position_jitter": {
+          "x": 0.25,
+          "y": 0.0,
+          "z": 0.25
+        },
+        "scale_range": [
+          0.8,
+          1.2
+        ],
+        "include_planes": false
+      },
+      "materials": {
+        "enabled": true,
+        "base_color_jitter": 0.18,
+        "randomize_kind": false,
+        "emissive_intensity_range": [
+          0.8,
+          1.35
+        ]
+      },
+      "lights": {
+        "enabled": true,
+        "position_jitter": {
+          "x": 0.35,
+          "y": 0.2,
+          "z": 0.35
+        },
+        "intensity_range": [
+          0.85,
+          1.3
+        ]
+      },
+      "camera": {
+        "enabled": true,
+        "pose_jitter": {
+          "x": 0.05,
+          "y": 0.02,
+          "z": 0.05
+        },
+        "fov_degrees_range": [
+          42.0,
+          50.0
+        ]
+      }
+    },
+    "outputs": {
+      "rgb": true,
+      "depth": true,
+      "depth_preview": true,
+      "segmentation": true,
+      "segmentation_preview": true,
+      "metadata": true
+    }
+  }
+}

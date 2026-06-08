@@ -3,7 +3,8 @@
 Milestone 4 turned `apps/dataset_generator` into a reproducible synthetic
 dataset pipeline for RGB/depth/segmentation camera outputs. Milestone 6A adds
 optional single-return LiDAR/raycast outputs that use the same uploaded
-`sim-core::Scene` geometry as the camera renderer.
+`sim-core::Scene` geometry as the camera renderer. Milestone 6B adds scenario
+files that combine a scene path, sensor rig, and dataset job.
 
 ## Quickstart
 
@@ -50,6 +51,15 @@ cargo run -p dataset_generator --features rocm -- \
   --overwrite
 ```
 
+Generate from a shared scenario:
+
+```bash
+cargo run -p dataset_generator --features rocm -- \
+  --scenario examples/scenarios/basic_sensor_rig.json \
+  --out target/scenario_dataset \
+  --overwrite
+```
+
 Validate a generated dataset:
 
 ```bash
@@ -75,6 +85,7 @@ Generation accepts:
 --camera-path static|orbit|line|random
 --seed <u64>
 --config <PATH>
+--scenario <PATH>
 --randomize
 --overwrite
 --dry-run
@@ -131,6 +142,40 @@ Config files are JSON and map to `DatasetConfig`:
 ```
 
 CLI flags override config values where they refer to the same setting.
+
+## Scenario Files
+
+Scenario files map to `ScenarioConfig`:
+
+```json
+{
+  "name": "basic_sensor_rig",
+  "scene_path": "examples/scenes/boxes_scene.json",
+  "rig": {
+    "name": "front_rig",
+    "base_transform": {
+      "translation": { "x": 0.0, "y": 1.1, "z": 4.5 },
+      "rotation": { "roll": 0.0, "pitch": 0.0, "yaw": 0.0 },
+      "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+    },
+    "mounts": []
+  },
+  "dataset": {
+    "frame_count": 4,
+    "seed": 20260608,
+    "outputs": {
+      "rgb": true,
+      "depth": true,
+      "segmentation": true,
+      "metadata": true
+    }
+  }
+}
+```
+
+The current dataset generator uses the first camera-like sensor mount and the
+first LiDAR mount from the rig. Scenario datasets keep the existing single
+camera/LiDAR output layout.
 
 See [Domain randomization](domain_randomization.md) for the
 `domain_randomization` config block used by
@@ -200,6 +245,8 @@ Each `metadata/frame_000001.json` includes:
 - LiDAR config, pose, output paths, and convention when enabled: single-return
   linear ray range in meters, `0.0` for miss/no return, zero XYZ point for miss,
   and object ID `0` for miss/background.
+- Scenario name, rig name, rig base transform, sensor mount transforms, and
+  sensor world transforms when generated from a scenario.
 
 ## Manifest
 
@@ -216,6 +263,8 @@ Each `metadata/frame_000001.json` includes:
 - Relative metadata path for every frame.
 - Depth and segmentation conventions.
 - LiDAR config and convention when enabled.
+- Scenario name, scene path, rig name, and sensor list when generated from a
+  scenario.
 - Renderer backend label.
 
 Timestamps are intentionally omitted so manifest output remains deterministic.
@@ -233,6 +282,7 @@ The validation command checks:
 - Randomized datasets include per-frame `domain_randomization` metadata.
 - LiDAR datasets include range, XYZ point, object ID, preview files, and
   per-frame LiDAR metadata.
+- Scenario datasets include scenario metadata in the manifest and every frame.
 
 ## Current Limitations
 
@@ -243,6 +293,7 @@ The validation command checks:
 - Domain randomization is deterministic but not collision-aware.
 - Per-frame domain randomization may upload a fresh scene every frame.
 - LiDAR is single-return raycast only; no noise model, multi-return, rolling
-  timing, motion distortion, or sensor rig abstraction yet.
+  timing, or motion distortion yet.
+- Scenario output layout is currently single camera plus optional single LiDAR.
 - No physics, ROS2, OpenUSD, or URDF.
 - Viewer presentation still uses ROCm -> host copy -> pixels upload.
